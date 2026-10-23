@@ -45,3 +45,6 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 本地构建产物（整合分支：交叉编译的 linux 二进制放这里，不入库）
+/bin/
