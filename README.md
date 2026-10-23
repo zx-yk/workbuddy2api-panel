@@ -18,6 +18,10 @@
 
 ---
 
+> [!NOTE]
+> **本分支（`integrated`，1.14.0-panel）是整合分支**：在上游 `73a7560` 基线上增加了 **OpenAI Responses**（`POST /v1/responses`，Codex 用）与 **Anthropic Messages**（`POST /v1/messages`，Claude Code 用）两种入站协议，以及服务端代执行 `web_search`。
+> 整合来源、取舍理由、未整合项与验证方式见 **[INTEGRATION.md](INTEGRATION.md)**。
+
 > [!IMPORTANT]
 > **项目已停止维护（2026-10-21）**：后续不再更新代码、不跟进上游变化、不再处理新的 issue / PR。
 >

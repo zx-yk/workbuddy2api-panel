@@ -144,6 +144,15 @@ func NewHandler(cfg Config) *Handler {
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
+	// Anthropic Messages 对话端点（见 anthropic.go）。上游注释里"留给未来的 chat 转发"
+	// 就是这里：/v1/messages 走 Anthropic 入站 → 翻译成 chat/completions → 再翻回
+	// Anthropic 响应/事件流，Claude Code 等客户端零改动接入。
+	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.anthropicMessages))
+	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.anthropicMessages))
+	// OpenAI Responses 端点（见 responses.go）：Codex 用 POST /v1/responses。
+	// GET 回 426 让 Codex 一次握手就回落 HTTPS，不必空转重连。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -190,7 +199,13 @@ func (h *Handler) tracedRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path)
+	switch r.URL.Path {
+	case "/v1/chat/completions",
+		"/v1/messages", "/messages",
+		"/v1/responses":
+		return true
+	}
+	return isSearchPath(r.URL.Path)
 }
 
 // isSearchPath 判断是否为搜索端点。
