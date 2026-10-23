@@ -19,24 +19,34 @@
 ---
 
 > [!NOTE]
-> **本分支（`integrated`，1.14.0-panel）是整合分支**：在上游 `73a7560` 基线上增加了 **OpenAI Responses**（`POST /v1/responses`，Codex 用）与 **Anthropic Messages**（`POST /v1/messages`，Claude Code 用）两种入站协议，以及服务端代执行 `web_search`。
-> 整合来源、取舍理由、未整合项与验证方式见 **[INTEGRATION.md](INTEGRATION.md)**。
+> **`integrated` 分支（1.14.0-panel）在 1.13.0 基础上多接入了两种协议**，同一个 `api_key`、同一个账号池，不需要额外开关：
+>
+> | 端点 | 协议 | 典型客户端 |
+> |---|---|---|
+> | `POST /v1/chat/completions` | OpenAI Chat Completions | 通用 / new-api / 各类 SDK |
+> | `POST /v1/search/messages` | 联网搜索（上游原有） | 通用 |
+> | **`POST /v1/responses`** | OpenAI Responses | **Codex**（`GET` 主动回 `426` 引导回落 HTTPS） |
+> | **`POST /v1/messages`** · **`POST /messages`** | Anthropic Messages | **Claude Code**（`x-api-key` / `Bearer` 双兼容） |
+>
+> 服务端代执行 `web_search` 对以上任意入站生效：客户端只要声明托管搜索工具，网关自己探活 → 检索 → 注入，不要求客户端具备搜索能力。
+> 整合来源、取舍理由、未整合清单与验证记录见 **[INTEGRATION.md](INTEGRATION.md)**。
 
 > [!IMPORTANT]
-> **项目已停止维护（2026-10-21）**：后续不再更新代码、不跟进上游变化、不再处理新的 issue / PR。
+> **本分支在维护。** 原仓库（`linguo2625469/workbuddy2api-panel`）已于 **2026-10-21 宣布停止更新**，本 `integrated` 分支接续演进——不是继承它的墓志铭，是吸取它的经验。
 >
-> 原因有三：
-> 1. **上游已开始禁用反代**——WorkBuddy 对非官方客户端的识别与拦截正在收紧（通道校验、账号限制等），反代通道的稳定性与存活周期已不可控，继续做适配意义有限；
-> 2. **个人精力有限**——本项目本就是个人自用工具，无力长期跟进协议变化与风控对抗；
-> 3. **非法转卖泛滥**——发现大量批量注册小号、对外售卖额度、二次加壳 / 卡密分发的滥用行为，与本项目初衷完全相悖。
+> 上游停更给的三条教训，直接变成了本分支的取舍标准：
 >
-> 仓库保持现状可用（已合入的修复不会回退），但请自行评估风险：**上游随时可能彻底收紧导致不可用**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
+> 1. **风控收紧是常态，不是意外**——WorkBuddy 对非官方客户端的识别正在收紧（通道校验、账号限制、业务码分流）。所以这里优先吸收的不是新功能，而是**决定存活的部分**：`11-128` 通道校验分流、恒定 `X-Conversation-ID`、refresh 单飞防掉登录、`6021 queue.full` 归通道级繁忙而非账号错误。功能可以少，账号不能白死。
+> 2. **只收能验证的东西**——新协议入站必须有测试兜底才收（`/v1/responses`、`/v1/messages` 各自带原生测试文件）；需要改写 `client.go` 结构体、面板层大改的模块（余额趋势、多 API Key、定时任务、Prometheus）暂不收，宁缺不滥。整合来源与未整合清单见 **[INTEGRATION.md](INTEGRATION.md)**。
+> 3. **滥用是唯一会让我们也停下来的原因**——批量注册转售、加壳卡密分发，与项目初衷相悖，详见下方[使用声明](#使用声明必读)。
 >
-> **维护方式披露**：本仓库近期的 issue / PR 处置、代码审查、测试与修复实现**大量由 AI 辅助完成**（自动化编码 agent），合并与发布决策由维护者作出。请知悉后再使用或参与贡献。
+> **维护状态与边界**：代码持续跟进，上游后续提交与社区 fork 的有效修复会被评估吸收；issue / PR 会看，但这是个人项目，响应不承诺时效。合并与发布决策由维护者作出，实现过程会使用 AI 辅助编码——写在这里是为了让你知道**该以什么标准审阅这些代码**，而不是把它当作免检凭证。
+>
+> 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
-> 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
-> 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更，最后版本 **1.13.0-panel**）→ **本 `integrated` 分支（1.14.0-panel，维护中）**。
+> 本分支基线即上游最后一版 `73a7560`（1.13.0 + 69 个未发版提交），文档中的「上游」默认指 linguo2625469。
+> 可视化运维层在上游基础上重构；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
@@ -52,10 +62,10 @@
 我们对上述行为**表达最强烈的反对**，并声明如下：
 
 1. **一切商用 / 售卖行为与本项目及作者无关。** 本项目不授权、不支持、不参与任何面向公众的 API 售卖、账号池出租、卡密收费分发；行为人由此产生的一切后果（包括但不限于账号封禁、条款违约与法律风险）由其自行承担，与作者和贡献者无任何关系。
-2. **批量注册与转售接口配额违反目标平台服务条款。** CodeBuddy / 腾讯系服务条款禁止批量注册账号及商业转售接口。上游仓库已删除、停止公开维护——我们无法断定具体原因，但此类滥用行为正在毁掉所有正常使用者的环境，请勿再消耗社区的善意。
+2. **批量注册与转售接口配额违反目标平台服务条款。** CodeBuddy / 腾讯系服务条款禁止批量注册账号及商业转售接口。这条链上的初代仓库已被删除，接续维护者也已停止更新——我们无法断定具体原因，但可以确定：此类滥用正在毁掉所有正常使用者的环境，也正是本分支要在停更之后继续跟进的唯一理由。请勿再消耗社区的善意。
 3. **请勿购买任何「收费版」「卡密版」「公益中转版」。** 本项目永远免费开源。任何加壳、加密、捆绑收费的「版本」都是他人篡改的产物，与本项目无关；且此类分发无法审计，存在被植入后门、回传并窃取你 CodeBuddy 凭证的风险（`auths/` 中保存的是明文 accessToken / refreshToken）。**你付钱买到的不是本项目，而是把自己账号交给陌生人的机会。**
 4. **关于开源协议的诚实说明。** 本项目基于 MIT 协议开源，协议允许自由使用与修改源码——这是开源的本意，我们不会收回；但 MIT 赋予的是代码层面的自由，**不赋予**以本项目名义宣传、售卖、捆绑分发，或要求作者提供支持与背书的权利。作者不为任何第三方分发版本提供支持、更新承诺或安全保证。
-5. **作者保留止损的权利。** 若滥用行为持续，作者可能随时停止维护、关闭或删除仓库，且不另行通知。上游的今天可能就是本项目的明天，望自重。
+5. **本项目没有停止维护，但保留止损的权利。** 只要还有人正常自用，代码就会继续跟进。唯一会让它停下来的是**滥用本身**——若批量注册转售、加壳卡密分发持续，维护者可能停止更新、关闭或删除仓库，且不另行通知。上游就是这么停的：它不是被腾讯一封了之，而是在封锁收紧之后，被转卖消耗掉了继续做的理由。望自重。
 
 如果你的用途是管理自己的账号，欢迎正常使用、反馈问题与提交 PR。
 
@@ -79,6 +89,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
+| 🔌 **多协议入站** | **同一个 `api_key`、同一个账号池**对外提供四种形态：`/v1/chat/completions`（OpenAI Chat）、`/v1/responses`（OpenAI Responses，Codex）、`/v1/messages` + `/messages`（Anthropic Messages，Claude Code）、`/v1/search/messages`（联网搜索）。三种对话协议内部统一翻译成上游 chat，**Codex 与 Claude Code 可直连，不需要中间做协议转换** |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
@@ -167,7 +178,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ## 🆚 与上游的差异
 
-本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
+本分支相对初代 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（已删库，下称「初代上游」）的增量，均已在真实多账号环境验证。初代之后的 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（下称「面板上游」）所做的改动见[同步上游](#同步上游)第三轮——两者都已停更，本分支是这条链上唯一还在动的。
 
 ### 新增
 
@@ -204,7 +215,18 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
-> 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+**第三轮（`ea8b1e5` → `73a7560`，2026-09-14 ~ 2026-10-21，经 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 转手，69 个提交）**：
+
+| 上游改动 | 吸收内容 |
+|---|---|
+| 通道校验分流 | 国际版 `11-128` 同码不同因 → 归通道级错误、fail-fast 透传，**不罚号不轮转**（头由网关自己拼，重试必然失败）；`/v1/*` 恒定发送 `X-Conversation-ID` |
+| 抗风控加固 | `refresh` 单飞，防并发刷新把 refreshToken 撞废（12153 掉登录）；`6021 queue.full` 归通道级繁忙而非账号错误（不扩池、不冷却账号） |
+| 协议正确性 | `reasoning_text` 剥离、原生工具调用标记还原（修 Codex 11101 / 回合空转）、截断如实上报 |
+| 账号池调度 | FEFO 最早到期优先、积分保底 `credit_floor`、暂停选号 `paused`、模型锁池视图、地区独立调度（国内 / 国际各自轮询与顺序耗尽）、跨域兜底 |
+| 运维可观测 | 前缀缓存命中率、请求指标归档、账号备注、积分历史、补偿「先查后领」、任务补领清扫 |
+| 国内网络 | `cn.chat_base` 自定义对话基址、`GOPROXY` 国内源、`dns_servers` 出站 DNS 可配 |
+
+> 三轮之后上游自己宣布停更（2026-10-21），`73a7560` 即其最后一版。**本分支从此接续**：基线锁在该 commit，此后的演进（1.14.0-panel 的多协议入站）以本仓库为准，同时会继续评估吸收上游残留提交与社区 fork 的有效修复——上游停更 ≠ 本仓库停更。
 
 ## 架构总览
 
@@ -238,36 +260,33 @@ flowchart LR
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
-### 方式〇：GHCR 镜像（免克隆免构建）
+### 方式〇：本分支无预构建镜像
 
-CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+> ⚠️ 上游的 `ghcr.io/linguo2625469/workbuddy2api-panel:*` 停在 **1.13.0**，**不含本分支的多协议入站**。直接拉它、再把客户端指到 `/v1/responses` 或 `/v1/messages`，只会拿到 404/401——别混用。
+
+两条自建路径，按机器条件选：
 
 ```bash
-# 1. 准备配置与数据目录
-mkdir -p auths data && cp config.example.json config.json
-#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
+# A. 服务器上构建（推荐 ≥4G 内存的机器）
+git clone -b integrated https://github.com/zx-yk/workbuddy2api-panel.git
+cd workbuddy2api-panel
+docker build -t workbuddy2api-panel:1.14.0-integrated .
+# 然后把 docker-compose.yml 里的 image 换成该 tag，docker compose up -d wb2api
 
-# 2. 拉取并运行
-docker run -d --name workbuddy2api \
-  -p 7863:7863 -e TZ=Asia/Shanghai \
-  -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+# B. 本地交叉编译静态二进制，上传到小内存机器直接跑（2G 机器别容器内编译）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+  -o wb2api-linux-amd64 ./cmd/server
+# 二进制约 8.6M，无外部依赖，配合 ./auths ./data ./config.json 即可运行
 
-# 3. 健康检查（无可用账号时返回 503）
-curl -s http://localhost:7863/healthz
+# C. 让 GitHub Actions 自己发镜像：Actions → docker-ghcr → Run workflow（选 integrated 分支）
+#    产物推送到 ghcr.io/<你的账号>/workbuddy2api-panel，之后 docker pull 该地址
 ```
-
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
-> Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
->
-> 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
-> `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
 ```bash
-# 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+# 1. 克隆（本分支在 integrated 上，不是 main）
+git clone -b integrated https://github.com/zx-yk/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -369,6 +388,30 @@ curl -s http://localhost:7863/v1/search/messages \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","tools":[{"type":"web_search_20250305","name":"web_search"}],
        "messages":[{"role":"user","content":"Perform a web search for the query: OpenAI 最新模型"}]}'
+
+# OpenAI Responses（Codex 走这条；本分支新增）
+curl -sN http://localhost:7863/v1/responses \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"hi","stream":true}'
+# 顺带验证 WS 探测：应返回 426（不是 404/500）
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:7863/v1/responses \
+  -H "Authorization: Bearer your-api-key"
+
+# Anthropic Messages（Claude Code 走这条；本分支新增，鉴权用 x-api-key）
+curl -sN http://localhost:7863/v1/messages \
+  -H "x-api-key: your-api-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
+客户端侧只需两条环境变量：
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:7863     # Claude Code：不带 /v1
+export ANTHROPIC_API_KEY=your-api-key               # 走 x-api-key
+# Codex：base_url 指到 http://localhost:7863/v1，并设 supports_websockets = false
 ```
 
 ## 配置说明
@@ -658,8 +701,7 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 与 chat 共享同一套账号池语义：选号轮转、在途租约、token 临近过期自动刷新、失败按错误
 类型冷却或熔断。
 
-**为什么不用 `/v1/messages`**：那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发；
-搜索挂在 `/v1/search/messages`，语义清晰且互不干扰。
+**为什么搜索不挂在 `/v1/messages`**：那是 Anthropic 模型对话的标准路径（现已实现，见下节），搜索挂 `/v1/search/messages`，语义清晰且互不干扰——两者的请求形态都是 Anthropic Messages，但一个只返回 `web_search_tool_result`、一个走完整对话链路。
 
 请求（Anthropic Messages 形态）：
 
@@ -714,6 +756,37 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 > **上游未实现的参数不要暴露给用户**：实测 `allowed_domains`、`freshness`、
 > `blocked_domains`（折成 `(-site:)` 拼进 query）在服务端均**静默失效**——传了不报错也
 > 不生效。本端点因此不接受这三个字段，避免调用方产生「已过滤」的错误预期。
+
+### OpenAI Responses `POST /v1/responses`
+
+给 **Codex** 这类按 Responses API 接入的客户端：baseURL 指向 `<网关>/v1` 即可，走同一把 `api_key`、同一个账号池。
+
+**无状态实现**——不保存 `previous_response_id`、`store` 被忽略，每轮由客户端带全量 `input`（与 Codex 实际行为一致）。据此带来的几个行为差异，都是刻意的：
+
+| 点 | 行为 | 为什么 |
+|---|---|---|
+| 推理展示 | `response.reasoning_summary_{part,text}.{added,delta,done}` 事件族 | 上游只给 `reasoning_content` 文本，没有加密 reasoning item |
+| 事件序号 | 每个 SSE 事件带递增 `sequence_number` | 当前 Responses wire 契约要求，Codex 会读 |
+| 截断 / 拦截 | 如实发 `response.incomplete` + `incomplete_details.reason`（`max_output_tokens` / 内容策略） | 伪装成 `completed` 会让客户端把半截响应当完整结果落库 |
+| `GET /v1/responses` | **返回 426**（带 `Upgrade: websocket`） | 不存连接内状态，WS 复用无从谈起。426 让 Codex 一次握手就粘性回落 HTTPS；不返的话它会空转 `max_retries` 次，日志刷 `Reconnecting… n/5` |
+
+字段映射：`instructions` → system 提示词；`max_output_tokens` → 上游输出上限；`input` 支持字符串或消息数组（含 `function_call` / `function_call_output` 回填）。
+
+### Anthropic Messages `POST /v1/messages` · `POST /messages`
+
+给 **Claude Code** 这类按 Anthropic SDK 接入的客户端：`ANTHROPIC_BASE_URL` 指向网关根路径即可。两个路径等价，`/messages` 是给 baseURL 只写到根（不带 `/v1`）的客户端兜底。
+
+| 点 | 行为 |
+|---|---|
+| 鉴权 | `x-api-key` 与 `Authorization: Bearer` **双兼容**（官方 SDK 用前者；空 Authorization 时提升再走同一套常量时间比较）。失败返 Anthropic 形态 `401 authentication_error`，不是 OpenAI 形态 |
+| 工具往返 | `tool_use` / `tool_result` ↔ `tool_calls` 双向映射，流式按 Anthropic 事件名输出（`message_start` / `content_block_start` / `content_block_delta` / `message_delta` / `message_stop`） |
+| 多模态 | `image` 块（base64 或 url）转 `image_url` |
+| 思考档 | `output_config.effort` 优先；旧式 `thinking.budget_tokens` 按档位表折成 `reasoning_effort` |
+| `usage` | 按 Claude 口径：`input_tokens` **不含**缓存读写，`cache_read_input_tokens` 取上游 `prompt_cache_hit_tokens`（上游那两个 `cache_*_input_tokens` 恒 0，不映射的话客户端永远显示缓存 0） |
+| 丢弃项 | `top_k`、`cache_control`、`context_management`、`betas`、`count_tokens`——上游 chat 没有对应物，硬塞会扭曲语义 |
+| 服务端工具 | `web_search` 由网关代执行（探活 → 检索 → 注入）；`code_execution` / `bash_*` 等无执行器的工具**丢弃并在 system 里写明**，避免模型假装调用后空转 |
+
+`thinking` 块的处理值得单说：上游 `reasoning_content` 没有 signature，下发时作为 `thinking` 块供 Claude Code 展示；客户端回传的 `thinking` 块直接丢弃，不触发签名校验——否则每轮都会因签名不匹配而失败。
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 
