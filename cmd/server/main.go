@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 透出到 /panel/api/overview。
-const appVersion = "1.14.2-panel"
+const appVersion = "1.14.3-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -193,8 +193,10 @@ func main() {
 		TravelHours:    cfg.Schedule.TravelHours,
 		ActivityHours:  cfg.Schedule.ActivityHours,
 		KeepaliveHours: cfg.Schedule.KeepaliveHours,
-		BlackcatHours:  cfg.Schedule.BlackcatHours,
-		GrowthHours:    cfg.Schedule.GrowthHours,
+		// 排程保活只刷新临期凭证；面板手动全量保活不受影响。
+		KeepaliveRefreshWindow: cfg.KeepaliveRefreshWindowDur,
+		BlackcatHours:          cfg.Schedule.BlackcatHours,
+		GrowthHours:            cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,
@@ -227,7 +229,7 @@ func main() {
 	if !cfg.Schedule.KeepaliveEnabled {
 		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
 	} else {
-		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
+		log.Printf("token 保活已启用：%v 点（仅刷新 %s 内临期凭证）", cfg.Schedule.KeepaliveHours, cfg.KeepaliveRefreshWindowDur)
 	}
 	switch {
 	case !cfg.Schedule.BlackcatEnabled:
@@ -452,7 +454,7 @@ func panelListenPath(listen string) string {
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
 //   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
-//   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
+//   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow/SetKeepaliveRefreshWindow
 //
 // 需重启（涉及监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
 //   - listen / auth_dir / state_file / upstream.* / upstash.* / session_sticky.*（TTL 类）
@@ -540,6 +542,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	_ = p.SetScheduling(newCfg.Pool.Strategy, newCfg.Pool.AccountOrder)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
+	sch.SetKeepaliveRefreshWindow(newCfg.KeepaliveRefreshWindowDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,

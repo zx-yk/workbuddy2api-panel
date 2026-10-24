@@ -74,8 +74,12 @@ type Config struct {
 		TravelHours    []int `json:"travel_hours"`    // [9,21]
 		ActivityHours  []int `json:"activity_hours"`  // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		BlackcatHours  []int `json:"blackcat_hours"`  // [23] 夜猫子窗口（23:00–08:00 计数）
-		GrowthHours    []int `json:"growth_hours"`    // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
+		// KeepaliveRefreshWindow 周期保活的临期窗口：排程到点只刷新剩余有效期
+		// 不超过该时长的 token（已过期/无到期时间始终刷新）；面板手动保活仍
+		// 全量。空 = 默认 "168h"，非法或非正值启动报错。
+		KeepaliveRefreshWindow string `json:"keepalive_refresh_window"`
+		BlackcatHours          []int  `json:"blackcat_hours"` // [23] 夜猫子窗口（23:00–08:00 计数）
+		GrowthHours            []int  `json:"growth_hours"`   // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/BlackcatEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
@@ -262,6 +266,8 @@ type Config struct {
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
+	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口，默认 7 天。
+	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
@@ -291,6 +297,7 @@ func Default() *Config {
 	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
+	c.Schedule.KeepaliveRefreshWindow = "168h"
 	c.Schedule.BlackcatHours = []int{23}
 	c.Schedule.GrowthHours = []int{1}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
@@ -628,6 +635,17 @@ func (c *Config) normalize() error {
 	}
 	if len(c.Schedule.KeepaliveHours) == 0 {
 		c.Schedule.KeepaliveHours = []int{22}
+	}
+	// 周期保活临期窗口：空值回落 168h；非法/非正值 fail fast，避免拼错后退化成
+	// 每日全量刷新而无人察觉。
+	if c.Schedule.KeepaliveRefreshWindow == "" {
+		c.Schedule.KeepaliveRefreshWindow = "168h"
+	}
+	if c.KeepaliveRefreshWindowDur, err = time.ParseDuration(c.Schedule.KeepaliveRefreshWindow); err != nil {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %w", err)
+	}
+	if c.KeepaliveRefreshWindowDur <= 0 {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %q 必须为正时长（如 168h）", c.Schedule.KeepaliveRefreshWindow)
 	}
 	if len(c.Schedule.BlackcatHours) == 0 {
 		c.Schedule.BlackcatHours = []int{23}

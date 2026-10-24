@@ -37,12 +37,21 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.2-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.3-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.3 · 2026-10-25
+
+本次继续收敛稳定性与日常运维成本，原有 API 不变；新增可选配置 `schedule.keepalive_refresh_window`：
+
+- **选号负载均衡**：默认加权选号增加 1 小时窗口内的被选次数降权，近期被反复选中的账号权重下降，新流量更多摊向少用账号；会话粘性命中不重新选号，快过期积分和余额权重继续共同生效。
+- **面板静态资源防旧缓存**：页面、`app.js`、`mobile.js` 和 `mobile.css` 均返回 `Cache-Control: no-store`，页面引用同时带版本查询参数，发版后浏览器和中间缓存不会继续执行旧脚本。
+- **周期保活只刷临期凭证**：新增 `schedule.keepalive_refresh_window`，默认 `168h`。排程保活只刷新剩余有效期不超过该窗口的 token，已过期或无到期时间的账号始终刷新；面板手动“全部保活”仍全量执行。
+- 本版未加入国际版出图模型目录补全：当前分支尚未提供出图端点，单独补目录会让客户端选到不可调用的模型，因此留待出图能力落地后再评估。
 
 ### v1.14.2 · 2026-10-25
 
@@ -76,8 +85,8 @@
 - [ptrel1/workbuddy2api-panel · `feat/balance-trend`](https://github.com/ptrel1/workbuddy2api-panel/tree/feat/balance-trend)：OpenAI Responses、Anthropic Messages 与托管搜索的协议实现参考。
 - [LeisureLinux/workbuddy2api-panel](https://github.com/LeisureLinux/workbuddy2api-panel)：本次自动任务 ID、缓存键、企业门控与账号表空白修复的主要参考。
 - [rsfree/workbuddy2api](https://github.com/rsfree/workbuddy2api)：企业会话误判、前端严格模式与空内容 11151 防护的修复参考。
-- [misakano7545/workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel)：出站 ID 官方形态、企业会话判据、网关 401 求证与 6000 模型级限流的交叉验证参考。
-- [aibyhub/workbuddy2api-panel](https://github.com/aibyhub/workbuddy2api-panel)：超时有界换号与余额刷新错峰退避的实现参考。
+- [misakano7545/workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel)：出站 ID 官方形态、企业会话判据、网关 401 求证、6000 模型级限流与临期 token 保活的交叉验证参考。
+- [aibyhub/workbuddy2api-panel](https://github.com/aibyhub/workbuddy2api-panel)：超时有界换号、余额刷新错峰退避、选号窗口降权与面板静态缓存治理的实现参考。
 
 同时感谢 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的初代设计与 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的面板化基础。
 
@@ -304,7 +313,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.2` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.3` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -316,17 +325,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.2-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.2-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.2-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.2-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.2-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.3-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.3-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.3-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.3-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.3-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.2
+V=1.14.3
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

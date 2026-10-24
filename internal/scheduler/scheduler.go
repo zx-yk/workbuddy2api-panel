@@ -28,8 +28,12 @@ type Config struct {
 	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
-	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
-	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
+	// KeepaliveRefreshWindow 排程保活的临期窗口：只刷新剩余有效期不超过该值
+	// （或已过期/无 expiry）的 token；0 = 未配置，New 回落 7 天。手动全量保活
+	// 不受影响。
+	KeepaliveRefreshWindow time.Duration
+	BlackcatHours          []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
+	GrowthHours            []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
@@ -122,6 +126,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
+	if cfg.KeepaliveRefreshWindow == 0 {
+		cfg.KeepaliveRefreshWindow = 7 * 24 * time.Hour
+	}
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
@@ -181,6 +188,21 @@ func (s *Scheduler) includeDisabledInTasks() bool {
 func (s *Scheduler) SetIncludeDisabledInTasks(v bool) {
 	s.schedMu.Lock()
 	s.cfg.IncludeDisabledInTasks = v
+	s.schedMu.Unlock()
+}
+
+// keepaliveRefreshWindow 返回排程保活的临期窗口（配置快照）。
+func (s *Scheduler) keepaliveRefreshWindow() time.Duration {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.KeepaliveRefreshWindow
+}
+
+// SetKeepaliveRefreshWindow 热更新临期窗口（schedule.keepalive_refresh_window）。
+// 非正值视为不过滤，退化为排程全量刷新。
+func (s *Scheduler) SetKeepaliveRefreshWindow(d time.Duration) {
+	s.schedMu.Lock()
+	s.cfg.KeepaliveRefreshWindow = d
 	s.schedMu.Unlock()
 }
 
@@ -434,7 +456,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskActivity:
 				s.runActivity(ctx)
 			case taskKeepalive:
-				s.RunKeepaliveNow()
+				s.runKeepalive(true)
 			case taskBlackcat:
 				s.RunBlackcatNow()
 			case taskGrowth:
@@ -612,6 +634,19 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
 func (s *Scheduler) RunKeepaliveNow() {
+	s.runKeepalive(false)
+}
+
+// runKeepalive 遍历账号刷新 token。selective=true 仅用于排程到点：只刷新临期
+// 窗口内的账号（已过期/无 expiry 始终包含）；手动入口 false，始终全量。
+func (s *Scheduler) runKeepalive(selective bool) {
+	var window time.Duration
+	if selective {
+		window = s.keepaliveRefreshWindow()
+		if window <= 0 {
+			selective = false
+		}
+	}
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
@@ -619,6 +654,9 @@ func (s *Scheduler) RunKeepaliveNow() {
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			continue
+		}
+		if selective && !a.NeedsRefresh(window) {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {

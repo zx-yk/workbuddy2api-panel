@@ -248,6 +248,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
+	notePickLocked(e, now)
 	return e.a
 }
 
@@ -345,13 +346,14 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		return nil
 	}
 	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
-	best.lastUsed = time.Now()
+	best.lastUsed = now
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
 	// LRU 兜底（按 usedSeq 取最旧）眼里永远是「最旧」，刚被用过就被立刻再选——
 	// 防集中/防惊群失效（entry.usedSeq 契约：每次被选中时取 p.pickSeq 自增值）。
 	p.pickSeq++
 	best.usedSeq = p.pickSeq
+	notePickLocked(best, now)
 	return best.a
 }
 
@@ -368,6 +370,38 @@ func (p *Pool) inFlightFull(e *entry) bool {
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
+
+// 选号负载均衡：余额权重只反映存量，不反映最近的使用节奏。窗口内被选次数
+// 越多，权重按 1/(1+decay×count) 下调，使新选号自然摊向少用账号。参数固定
+// 在代码内，不暴露配置；会话粘性命中不经过 pick，因此不会拆散已有会话。
+const (
+	fairnessWindow = time.Hour
+	fairnessCap    = 16
+	fairnessDecay  = 0.25
+)
+
+// notePickLocked 给一次选中打点，环形保留窗口内最近 fairnessCap 次。调用方须持 p.mu。
+func notePickLocked(e *entry, now time.Time) {
+	e.pickStamps = append(e.pickStamps, now)
+	if n := len(e.pickStamps); n > fairnessCap {
+		e.pickStamps = e.pickStamps[n-fairnessCap:]
+	}
+}
+
+// loadFairnessLocked 返回负载惩罚因子 ∈ (0,1]，并惰性清理窗口外时间戳。
+// 调用方须持 p.mu 写锁。
+func loadFairnessLocked(e *entry, now time.Time) float64 {
+	if n := len(e.pickStamps); n > 0 {
+		cut := 0
+		for cut < n && now.Sub(e.pickStamps[cut]) > fairnessWindow {
+			cut++
+		}
+		if cut > 0 {
+			e.pickStamps = append(e.pickStamps[:0], e.pickStamps[cut:]...)
+		}
+	}
+	return 1 / (1 + fairnessDecay*float64(len(e.pickStamps)))
+}
 
 // pickWeighted 加权随机（claude-api selectWeightedRandom 参考口径）：
 //
@@ -437,6 +471,8 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 3.（原「成功率 ×3」因子已删，对齐上游 success-ema-review：errTotal 是终身
 	// 累计、只增不减，成功率 = successCount/(successCount+errTotal) 会让早期出过错
 	// 的号被永久压权且永不恢复；瞬时健康信号已由冷却/熔断/连败降权承接。）
+	// 4. 窗口内被选次数降权：高余额号若近期被反复选中，也要把新流量让给少用号。
+	w *= loadFairnessLocked(e, now)
 	return w
 }
 

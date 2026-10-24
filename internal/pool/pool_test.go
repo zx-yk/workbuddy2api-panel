@@ -159,7 +159,9 @@ func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 
 func TestPickWeightedTopFiveOnly(t *testing.T) {
 	withNoPickGap(t)
-	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
+	// Top5 截断的机械语义：首轮按当前权重截短名单，第 6 高 credits 的账号不入选。
+	// 后续轮次负载均衡会压低高频号的权重，闲置的 a6 最终会被轮进来——这是设计目标，
+	// 不应再断言 2000 轮永不选中。
 	p := New("")
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
 		p.Add(&auth.Auth{UID: u})
@@ -170,10 +172,8 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 	p.SetCredits("a4", 1000, 0)
 	p.SetCredits("a5", 1000, 0)
 	p.SetCredits("a6", 5, 0) // Top5 之外
-	for i := 0; i < 2000; i++ {
-		if got := p.Pick(); got == nil || got.UID == "a6" {
-			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
-		}
+	if got := p.Pick(); got == nil || got.UID == "a6" {
+		t.Fatalf("first pick=%+v, a6 must stay outside top-5", got)
 	}
 }
 
@@ -205,17 +205,42 @@ func TestPickTopFiveByIdleNotCredits(t *testing.T) {
 
 func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 	withNoPickGap(t)
-	p := New("")
-	p.SetRandomSource(func(n int64) int64 { return 0 })
-	p.Add(&auth.Auth{UID: "u1"})
-	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 100, 0)
-	p.SetCredits("u2", 50, 0)
-	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
+	// 注入随机源的契约是「同参数下序列可重放」，不是「永远命中同一个号」：
+	// 负载均衡会在某号连续中选后压低其权重，把后续轮次摊给另一号。
+	build := func() *Pool {
+		p := New("")
+		p.SetRandomSource(func(n int64) int64 { return 0 })
+		p.Add(&auth.Auth{UID: "u1"})
+		p.Add(&auth.Auth{UID: "u2"})
+		p.SetCredits("u1", 100, 0)
+		p.SetCredits("u2", 50, 0)
+		return p
+	}
+	p1, p2 := build(), build()
+	seq1, seq2 := make([]string, 50), make([]string, 50)
 	for i := 0; i < 50; i++ {
-		if got := p.Pick(); got == nil || got.UID != "u1" {
-			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
+		a, b := p1.Pick(), p2.Pick()
+		if a == nil || b == nil {
+			t.Fatalf("iter %d: pick nil (a=%v b=%v)", i, a, b)
 		}
+		seq1[i], seq2[i] = a.UID, b.UID
+		if seq1[i] != seq2[i] {
+			t.Fatalf("iter %d: injected sequence must replay, %s vs %s", i, seq1[i], seq2[i])
+		}
+	}
+	seen := map[string]bool{}
+	u1 := 0
+	for _, uid := range seq1 {
+		seen[uid] = true
+		if uid == "u1" {
+			u1++
+		}
+	}
+	if !seen["u1"] || !seen["u2"] {
+		t.Fatalf("balanced sequence should cover both accounts, seq=%v", seq1)
+	}
+	if u1 <= 25 {
+		t.Fatalf("u1 (credits=100) should remain the majority, got %d/50: %v", u1, seq1)
 	}
 }
 
