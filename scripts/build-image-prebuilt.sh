@@ -2,7 +2,7 @@
 # 本地交叉编译 → 组装最小构建上下文 → docker build。
 #
 # 适用：1) 构建机没装 Docker（做不了 docker build），但装了 Go；
-#      2) 目标机内存小（2G），docker build 里跑 go build 会 OOM。
+#      2) 目标机内存有限，docker build 里跑 go build 会 OOM。
 # 编译在调用方完成（需要 Go ≥ 1.22），容器里只做 COPY，构建峰值内存 < 100M。
 #
 #   ./scripts/build-image-prebuilt.sh                      本地编译 + 直接 docker build

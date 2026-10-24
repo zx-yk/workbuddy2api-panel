@@ -3,7 +3,7 @@
 # prebuilt：不在容器里编译，直接装本地交叉编译好的 linux/amd64 产物。
 #
 # 为什么需要它：主 Dockerfile 的 build 阶段要跑 go build，Go 编译峰值内存约
-# 800M~1.2G。2G 小机器上 docker build 极易 OOM（swap 也会被拖死），而产物本身
+# 800M~1.2G。低内存机器上 docker build 极易 OOM（swap 也会被拖死），而产物本身
 # 只有 24M。所以改成「本地/CI 编好 → 只 COPY」。
 #
 # 构建上下文由 scripts/build-image-prebuilt.sh 组装（bin/ + 脚本 + example 配置），

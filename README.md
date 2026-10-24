@@ -19,34 +19,26 @@
 ---
 
 > [!NOTE]
-> **`integrated` 分支（1.14.0-panel）在 1.13.0 基础上多接入了两种协议**，同一个 `api_key`、同一个账号池，不需要额外开关：
+> **同一个 `api_key`、同一个账号池，支持三种入站协议**，无需额外开关：
 >
 > | 端点 | 协议 | 典型客户端 |
 > |---|---|---|
-> | `POST /v1/chat/completions` | OpenAI Chat Completions | 通用 / new-api / 各类 SDK |
-> | `POST /v1/search/messages` | 联网搜索（上游原有） | 通用 |
-> | **`POST /v1/responses`** | OpenAI Responses | **Codex**（`GET` 主动回 `426` 引导回落 HTTPS） |
-> | **`POST /v1/messages`** · **`POST /messages`** | Anthropic Messages | **Claude Code**（`x-api-key` / `Bearer` 双兼容） |
+> | `POST /v1/chat/completions` | OpenAI Chat Completions | 通用 / 各类 SDK |
+> | `POST /v1/responses` | OpenAI Responses | Codex（`GET` 主动回 `426` 引导回落 HTTPS） |
+> | `POST /v1/messages` · `POST /messages` | Anthropic Messages | Claude Code（`x-api-key` / `Bearer` 双兼容） |
+> | `POST /v1/search/messages` | 联网搜索 | 通用 |
 >
 > 服务端代执行 `web_search` 对以上任意入站生效：客户端只要声明托管搜索工具，网关自己探活 → 检索 → 注入，不要求客户端具备搜索能力。
-> 整合来源、取舍理由、未整合清单与验证记录见 **[INTEGRATION.md](INTEGRATION.md)**。
 
 > [!IMPORTANT]
-> **本分支在维护。** 原仓库（`linguo2625469/workbuddy2api-panel`）已于 **2026-10-21 宣布停止更新**，本 `integrated` 分支接续演进——不是继承它的墓志铭，是吸取它的经验。
+> **本分支在维护。** 上游 `linguo2625469/workbuddy2api-panel` 已于 **2026-10-21** 停止更新，本 `integrated` 分支接续演进：优先保证与账号存活相关的修复（通道校验分流、恒定 `X-Conversation-ID`、refresh 单飞、业务码正确归类），再谈新功能。
 >
-> 上游停更给的三条教训，直接变成了本分支的取舍标准：
->
-> 1. **风控收紧是常态，不是意外**——WorkBuddy 对非官方客户端的识别正在收紧（通道校验、账号限制、业务码分流）。所以这里优先吸收的不是新功能，而是**决定存活的部分**：`11-128` 通道校验分流、恒定 `X-Conversation-ID`、refresh 单飞防掉登录、`6021 queue.full` 归通道级繁忙而非账号错误。功能可以少，账号不能白死。
-> 2. **只收能验证的东西**——新协议入站必须有测试兜底才收（`/v1/responses`、`/v1/messages` 各自带原生测试文件）；需要改写 `client.go` 结构体、面板层大改的模块（余额趋势、多 API Key、定时任务、Prometheus）暂不收，宁缺不滥。整合来源与未整合清单见 **[INTEGRATION.md](INTEGRATION.md)**。
-> 3. **滥用是唯一会让我们也停下来的原因**——批量注册转售、加壳卡密分发，与项目初衷相悖，详见下方[使用声明](#使用声明必读)。
->
-> **维护状态与边界**：代码持续跟进，上游后续提交与社区 fork 的有效修复会被评估吸收；issue / PR 会看，但这是个人项目，响应不承诺时效。合并与发布决策由维护者作出，实现过程会使用 AI 辅助编码——写在这里是为了让你知道**该以什么标准审阅这些代码**，而不是把它当作免检凭证。
+> **边界**：代码持续跟进，上游残留提交与社区的有效修复会被评估吸收；issue / PR 会看，但这是个人项目，响应不承诺时效。合并与发布决策由维护者作出，实现过程会使用 AI 辅助编码——写在这里是为了让你知道**该以什么标准审阅这些代码**，而不是把它当作免检凭证。
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更，最后版本 **1.13.0-panel**）→ **本 `integrated` 分支（1.14.0-panel，维护中）**。
-> 本分支基线即上游最后一版 `73a7560`（1.13.0 + 69 个未发版提交），文档中的「上游」默认指 linguo2625469。
-> 可视化运维层在上游基础上重构；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.0-panel，维护中）**。
+> 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
@@ -178,7 +170,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ## 🆚 与上游的差异
 
-本分支相对初代 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（已删库，下称「初代上游」）的增量，均已在真实多账号环境验证。初代之后的 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（下称「面板上游」）所做的改动见[同步上游](#同步上游)第三轮——两者都已停更，本分支是这条链上唯一还在动的。
+本分支相对初代 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（已删库，下称「初代上游」）的增量，均已在真实多账号环境验证。初代之后的 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（下称「面板上游」）所做的改动见[同步上游](#同步上游)第三轮——两者均已停更，本分支是这条链上仍在维护的版本。
 
 ### 新增
 
@@ -213,9 +205,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 粘性按模型判活 | 会话绑定的账号被 6004 模型级限额后，换模型请求自动解绑重分配（治"限额后换不动号"）；`/healthz` 探活计入模型豁免形态（治"全号被单模型限流探活误报 503"） |
 | report 增强 | `ReportChatActivity` 支持独立 `requestID`（同会话多轮上报各条可区分） |
 
-未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
-
-**第三轮（`ea8b1e5` → `73a7560`，2026-09-14 ~ 2026-10-21，经 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 转手，69 个提交）**：
+**第三轮（`ea8b1e5` → `73a7560`，2026-09-14 ~ 2026-10-21，经 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 维护期间合并，69 个提交）**：
 
 | 上游改动 | 吸收内容 |
 |---|---|
@@ -315,7 +305,7 @@ cd /opt/wb2api-panel && cp config.example.json config.json && ./wb2api -config c
 ./scripts/build-image-prebuilt.sh --ctx-only     # 交叉编译四个二进制 + 组装 24M 上下文
 scp -r prebuilt-ctx root@<host>:/root/
 ssh root@<host> 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:dev .'
-# 目标机零编译，实测 41.7MB / 13s（1.7G 内存机器跑得动）；本机有 Docker 可省传输，--save 可导出 tar
+# 目标机零编译，实测 41.7MB / 13s（低配机器亦可）；本机有 Docker 可省传输，--save 可导出 tar
 
 # C2. 目标机直接构建（需 ≥4G 内存，build 阶段 go build 峰值约 1G）
 git clone https://github.com/zx-yk/workbuddy2api-panel.git
