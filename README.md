@@ -264,25 +264,36 @@ flowchart LR
 
 > ⚠️ 上游的 `ghcr.io/linguo2625469/workbuddy2api-panel:*` 停在 **1.13.0**，**不含本分支的多协议入站**。直接拉它、再把客户端指到 `/v1/responses` 或 `/v1/messages`，只会拿到 404/401——别混用。
 
-三条自建路径，按机器条件选：
+四条自建路径，按机器条件选：
 
 ```bash
-# A. 服务器上构建（推荐 ≥4G 内存的机器）
+# A. 本地编译 + 目标机只 COPY（推荐：小内存机器 / 本机没装 Docker）
+./scripts/build-image-prebuilt.sh --ctx-only        # 本机交叉编译四个二进制 + 组装 24M 上下文
+scp -r prebuilt-ctx root@<host>:/root/              # 传上去
+ssh root@<host> 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:1.14.0-integrated .'
+# 目标机零编译：镜像里只有 COPY，实测 build 13s、41.7MB（1.7G 内存机器上面跑得动）
+# 本机装了 Docker 的话可省掉传输：./scripts/build-image-prebuilt.sh
+# 拿不到镜像仓库时导出成 tar：./scripts/build-image-prebuilt.sh --save → docker load
+
+# B. 直接在目标机构建（要 ≥4G 内存，build 阶段 go build 峰值约 1G）
 git clone https://github.com/zx-yk/workbuddy2api-panel.git   # integrated 已是默认分支
 cd workbuddy2api-panel
 docker build -t workbuddy2api-panel:1.14.0-integrated .
-# 然后把 docker-compose.yml 里的 image 换成该 tag，docker compose up -d wb2api
 
-# B. 本地交叉编译静态二进制，上传到小内存机器直接跑（2G 机器别容器内编译）
+# C. 不要 Docker，直接跑静态二进制
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
-  -o wb2api-linux-amd64 ./cmd/server
-# 二进制约 8.6M，无外部依赖，配合 ./auths ./data ./config.json 即可运行
+  -o wb2api ./cmd/server
+# 8.6M 单文件，无外部依赖，配合 ./auths ./data ./config.json 即可运行
 
-# C. 让 GitHub Actions 自己发镜像
+# D. 让 GitHub Actions 自己发镜像
 #    前提：fork 会默认禁用 workflows，先到 Actions 页点「I understand my workflows, go ahead and enable them」
 #    然后 Actions → docker-ghcr → Run workflow（分支选 integrated）→ 产物推 ghcr.io/<你的账号>/workbuddy2api-panel
-#    ⚠️ 注意 workflow 的自动触发分支写的是 main，push 到 integrated 不会自动构建，只能手动 dispatch
+#    ⚠️ workflow 的自动触发分支写的是 main，push 到 integrated 不会自动构建，只能手动 dispatch
+
+# 最后一步都一样：docker-compose.yml 里 image 换成新 tag，再 up -d
 ```
+
+> **国内构建的坑**：`Dockerfile.prebuilt` 的 `apk add` 默认走 `mirrors.aliyun.com`。走官方 `dl-cdn.alpinelinux.org` 实测单次 build 卡了 13 分钟没动，换源后 13 秒完成。国外构建可 `--build-arg APK_MIRROR=dl-cdn.alpinelinux.org` 覆盖。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
