@@ -31,10 +31,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-// appVersion 网关版本。1.14.0-panel = 上游 73a7560 基线 + 多协议入站整合
-// （/v1/responses、/v1/messages、/messages），详见 INTEGRATION.md。
-const appVersion = "1.14.0-panel"
+// appVersion 透出到 /panel/api/overview。
+const appVersion = "1.14.1-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。

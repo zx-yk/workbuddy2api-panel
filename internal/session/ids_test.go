@@ -62,6 +62,25 @@ func TestNewMessageIDFormat(t *testing.T) {
 	}
 }
 
+func TestNewConversationIDShape(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		id := NewConversationID()
+		if len(id) != 36 || id[14] != '4' || !strings.ContainsRune("89ab", rune(id[19])) {
+			t.Fatalf("NewConversationID() = %q, want UUID v4 shape", id)
+		}
+		for _, pos := range []int{8, 13, 18, 23} {
+			if id[pos] != '-' {
+				t.Fatalf("NewConversationID() = %q, missing hyphen at %d", id, pos)
+			}
+		}
+		if seen[id] {
+			t.Fatalf("duplicate conversation ID: %q", id)
+		}
+		seen[id] = true
+	}
+}
+
 // TestRequestIDForKeyStability 同 key 恒稳定、异 key 各不同、空 key 每次新值。
 func TestRequestIDForKeyStability(t *testing.T) {
 	// 预热清空包级缓存，避免其他测试污染 key（测试隔离）。

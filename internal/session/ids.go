@@ -56,6 +56,18 @@ func NewMessageID() string {
 	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
 }
 
+// NewConversationID 生成网关自发起会话的 UUID v4 标识（36 字符带横线）。
+// 真实用户会话仍优先透传客户端声明的 conversationId；本函数只用于自动化任务上报。
+func NewConversationID() string {
+	var u [16]byte
+	if _, err := cryptorand.Read(u[:]); err != nil {
+		return NewMessageID()
+	}
+	u[6] = (u[6] & 0x0f) | 0x40
+	u[8] = (u[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
 // deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法
 // 按外部可控的键内容（会话键/轮级键）被预计算；重启换新（重启时旧对话轮/会话已
 // 结束，不构成断档）。会话级（RequestIDForKey）与轮级（TurnRequestID）共用同一盐。

@@ -193,7 +193,7 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
@@ -1518,4 +1518,3 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
-

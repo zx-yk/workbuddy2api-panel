@@ -264,6 +264,7 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
@@ -531,7 +532,14 @@ async function loadOverview(quiet) {
     // 「检查」之后卡片永远停在那一刻的旧数据。
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
     if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
-  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+  } catch (e) {
+    // 自动轮询的网络错误保持静默，渲染错误必须留痕，避免表格空白却无诊断信息。
+    if (e && (e instanceof ReferenceError || e.name === 'TypeError')) {
+      console.error('[panel] 渲染异常', e);
+    } else if (!quiet) {
+      toast(e.message, 'err');
+    }
+  }
 }
 
 $('accBody').addEventListener('click', async ev => {

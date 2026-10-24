@@ -37,10 +37,38 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.0-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.1-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
+
+## 更新记录
+
+### v1.14.1 · 2026-10-24
+
+本次为缺陷修复版本，不改变配置与 API 使用方式：
+
+- **自动任务 ID 对齐官方形态**：任务上报的会话 ID 改为 UUID v4、请求 ID 改为 32 位十六进制字符串，不再发送带项目前缀的自证标识。
+- **缓存键去账号明文**：`prompt_cache_key` 改为按账号与会话稳定派生的 UUID v4 形态，保留缓存复用和账号隔离，不再暴露 UID 片段。
+- **修正企业账号门控**：不再仅凭 `token_source=enterprise_switch` 跳过个人成长任务，避免未绑定企业租户的个人账号被误挡；真正带 `enterpriseId` 的企业账号仍按原规则处理。
+- **修复账号表空白**：补上 `rateLimitMeta()` 的局部变量声明，避免严格模式下模型限流记录触发 `ReferenceError`；渲染异常现在会写入浏览器控制台，前端测试也按严格模式执行。
+
+### v1.14.0 · 2026-10-24
+
+- 新增 OpenAI Responses `/v1/responses` 与 Anthropic Messages `/v1/messages`、`/messages` 入站。
+- 三种对话协议共用账号池，并支持网关托管 `web_search`。
+- 完善多平台 Release、预构建镜像与本地运行脚本。
+
+## 致谢与灵感来源
+
+感谢以下社区分支提供的实现参考与问题修复思路。这里列出的是实际参考过的内容，不表示将其整个分支合并进本项目：
+
+- [ptrel1/workbuddy2api-panel · `feat/balance-trend`](https://github.com/ptrel1/workbuddy2api-panel/tree/feat/balance-trend)：OpenAI Responses、Anthropic Messages 与托管搜索的协议实现参考。
+- [LeisureLinux/workbuddy2api-panel](https://github.com/LeisureLinux/workbuddy2api-panel)：本次自动任务 ID、缓存键、企业门控与账号表空白修复的主要参考。
+- [rsfree/workbuddy2api](https://github.com/rsfree/workbuddy2api)：企业会话误判与前端严格模式问题的独立修复参考。
+- [misakano7545/workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel)：出站 ID 官方形态与企业会话判据的交叉验证参考。
+
+同时感谢 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的初代设计与 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的面板化基础。
 
 ## 使用声明（必读）
 
@@ -216,7 +244,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 运维可观测 | 前缀缓存命中率、请求指标归档、账号备注、积分历史、补偿「先查后领」、任务补领清扫 |
 | 国内网络 | `cn.chat_base` 自定义对话基址、`GOPROXY` 国内源、`dns_servers` 出站 DNS 可配 |
 
-> 三轮之后上游自己宣布停更（2026-10-21），`73a7560` 即其最后一版。**本分支从此接续**：基线锁在该 commit，此后的演进（1.14.0-panel 的多协议入站）以本仓库为准，同时会继续评估吸收上游残留提交与社区 fork 的有效修复——上游停更 ≠ 本仓库停更。
+> 三轮之后上游自己宣布停更（2026-10-21），`73a7560` 即其最后一版。**本分支从此接续**：基线锁在该 commit，v1.14.0 增加多协议入站，后续演进以本仓库为准，同时会继续评估吸收上游残留提交与社区 fork 的有效修复——上游停更 ≠ 本仓库停更。
 
 ## 架构总览
 
@@ -265,7 +293,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.0` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.1` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -277,17 +305,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.0-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.0-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.0-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.0-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.0-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.1-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.1-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.1-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.1-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.1-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.0
+V=1.14.1
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
@@ -1072,9 +1100,9 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **预编译产物**：GitHub Release 提供五平台二进制包及 `checksums.txt`，GHCR 提供多架构镜像；也可从源码自构建
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **产物校验**：发布包可用 `checksums.txt` 校验；`go.sum` 约束 Go 模块依赖
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
