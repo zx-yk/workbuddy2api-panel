@@ -49,3 +49,5 @@ server.exe
 
 # 本地构建产物（整合分支：交叉编译的 linux 二进制放这里，不入库）
 /bin/
+# prebuilt 镜像构建上下文（scripts/build-image-prebuilt.sh 现场组装，不入库）
+/.ctx-prebuilt/
