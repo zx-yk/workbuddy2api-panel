@@ -264,11 +264,11 @@ flowchart LR
 
 > ⚠️ 上游的 `ghcr.io/linguo2625469/workbuddy2api-panel:*` 停在 **1.13.0**，**不含本分支的多协议入站**。直接拉它、再把客户端指到 `/v1/responses` 或 `/v1/messages`，只会拿到 404/401——别混用。
 
-两条自建路径，按机器条件选：
+三条自建路径，按机器条件选：
 
 ```bash
 # A. 服务器上构建（推荐 ≥4G 内存的机器）
-git clone -b integrated https://github.com/zx-yk/workbuddy2api-panel.git
+git clone https://github.com/zx-yk/workbuddy2api-panel.git   # integrated 已是默认分支
 cd workbuddy2api-panel
 docker build -t workbuddy2api-panel:1.14.0-integrated .
 # 然后把 docker-compose.yml 里的 image 换成该 tag，docker compose up -d wb2api
@@ -278,15 +278,17 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
   -o wb2api-linux-amd64 ./cmd/server
 # 二进制约 8.6M，无外部依赖，配合 ./auths ./data ./config.json 即可运行
 
-# C. 让 GitHub Actions 自己发镜像：Actions → docker-ghcr → Run workflow（选 integrated 分支）
-#    产物推送到 ghcr.io/<你的账号>/workbuddy2api-panel，之后 docker pull 该地址
+# C. 让 GitHub Actions 自己发镜像
+#    前提：fork 会默认禁用 workflows，先到 Actions 页点「I understand my workflows, go ahead and enable them」
+#    然后 Actions → docker-ghcr → Run workflow（分支选 integrated）→ 产物推 ghcr.io/<你的账号>/workbuddy2api-panel
+#    ⚠️ 注意 workflow 的自动触发分支写的是 main，push 到 integrated 不会自动构建，只能手动 dispatch
 ```
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
 ```bash
-# 1. 克隆（本分支在 integrated 上，不是 main）
-git clone -b integrated https://github.com/zx-yk/workbuddy2api-panel.git
+# 1. 克隆（integrated 即默认分支，不需要 -b）
+git clone https://github.com/zx-yk/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
