@@ -122,7 +122,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 取历史 tag 算 compare 链接
+          fetch-depth: 0     # 取完整历史算 compare 链接
+          fetch-tags: true   # 只给 fetch-depth 不够：默认不拉 tag 引用，git describe 会拿到空值
       - name: tag 与源码版本一致性断言
         run: |
           SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
@@ -147,12 +148,19 @@ jobs:
         run: |
           PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+      - name: 生成 Release 说明
+        run: |
+          {
+            printf 'CI 自动构建发布（五平台二进制 + checksums）。\n'
+            if [ -n "${{ steps.prev.outputs.prev }}" ]; then
+              printf '\n完整变更：https://github.com/%s/compare/%s...%s\n' \
+                "${{ github.repository }}" "${{ steps.prev.outputs.prev }}" "${{ github.ref_name }}"
+            fi
+          } > "$RUNNER_TEMP/release-body.md"
+          cat "$RUNNER_TEMP/release-body.md"
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}-panel
           prerelease: ${{ contains(github.ref_name, '-') }}
-          body: |
-            CI 自动构建发布（五平台二进制 + checksums）。
-
-            完整变更：https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.prev }}...${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-body.md
           files: dist/*
