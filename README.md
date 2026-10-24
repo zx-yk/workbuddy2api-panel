@@ -325,6 +325,16 @@ cd workbuddy2api-panel && docker build -t workbuddy2api-panel:dev .
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o wb2api ./cmd/server
 ```
 
+**D. 本地开发调试（不碰 Docker、不占服务器）**
+
+```bash
+./scripts/run-local.sh                  # 编译当前代码 + 起实例，默认 127.0.0.1:7863
+./scripts/run-local.sh --port 7900      # 换端口
+./scripts/run-local.sh --api-key mykey  # 换密钥（默认读 config，没有则 localtest）
+```
+
+只编 `cmd/server` 一个二进制（实测 14s），运行目录落在 `.run/`（已 gitignore）。账号池默认是空的：`/healthz` 显示 `total=0`、对话请求返回 503 `no_healthy_account` 都属预期；把账号 JSON 放进 `.run/auths/` 即可真实对话。面板在 `http://127.0.0.1:<port>/panel/`。
+
 > **CI 触发规则**（自己改流水线时看）：push 到 `integrated` → 测试 + 五平台编译 + 多架构镜像；打 `v*` tag → 额外生成语义化镜像 tag 与 Release 资产；PR 仅构建验证不发布。**`main` 是上游镜像快照，刻意不触发**，避免误发不含整合端点的旧版。
 > 新 fork 的仓库，GitHub 默认禁用 workflows，需先到 Actions 页点一次「I understand my workflows, go ahead and enable them」。
 

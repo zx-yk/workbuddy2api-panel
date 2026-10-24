@@ -52,3 +52,9 @@ server.exe
 # prebuilt 镜像构建上下文（scripts/build-image-prebuilt.sh 现场组装，不入库）
 /.ctx-prebuilt/
 /prebuilt-ctx/
+
+# 本地临时运行目录
+/.run/
+
+# 本地 OCI 工作目录（crane 拉取的 base 镜像等，不入库）
+/.ociwork/
