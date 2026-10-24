@@ -22,6 +22,26 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestTimeoutRotateExtraConfig(t *testing.T) {
+	def, err := ParseConfig([]byte(`{"upstream":{"timeout_seconds":10}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.TimeoutRotateExtra != 1 {
+		t.Fatalf("missing timeout_rotate_extra = %d, want 1", def.TimeoutRotateExtra)
+	}
+	off, err := ParseConfig([]byte(`{"timeout_rotate_extra":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.TimeoutRotateExtra != 0 {
+		t.Fatalf("explicit zero = %d, want 0", off.TimeoutRotateExtra)
+	}
+	if _, err := ParseConfig([]byte(`{"timeout_rotate_extra":-1}`)); err == nil {
+		t.Fatal("negative timeout_rotate_extra must be rejected")
+	}
+}
+
 func TestPanelPackageDetailLimit(t *testing.T) {
 	c := Default()
 	if err := c.normalize(); err != nil {

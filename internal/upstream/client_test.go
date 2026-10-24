@@ -154,6 +154,9 @@ func TestIsModelRateLimit(t *testing.T) {
 		// 6004：模型级限流（issue #31 的核心场景）。
 		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
 		{`{"code": 6004,"msg":"x"}`, true},
+		{`{"code":6000,"msg":"模型用量已达上限，请切换其他模型"}`, true},
+		{`{"code": "6000", "msg": "请切换其他模型"}`, true},
+		{`{"code":6000,"msg":"model usage limit exceeded"}`, false},
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},

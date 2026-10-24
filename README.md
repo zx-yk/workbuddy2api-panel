@@ -37,12 +37,22 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.1-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.2-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.2 · 2026-10-25
+
+本次为稳定性修复版本，原有配置与 API 保持兼容；新增 `timeout_rotate_extra`，默认值为 `1`：
+
+- **空内容请求防护**：在工具消息清理后，把无有效 `tool_calls` 的 `assistant` / `system` 空字符串、`null` 或缺失 `content` 修复为单空格，避免上游返回 11151 并把坏请求连坐到多个健康账号。
+- **网关 401 先求证**：无业务信封的裸 401 不再直接判断账号失效，而是先刷新令牌；只有刷新接口明确拒绝才累计会话失效，网络错误、5xx、429 和边缘拦截均不判死，成功刷新会保存新凭证并清除连续失效计数。
+- **超时有界加转**：传输层超时后可使用一次 `timeout_rotate_extra` 预算切换账号，不扩大原有 `MaxRotate` 上限、不累计账号失败或冷却；配置为 `0` 可关闭。
+- **余额刷新错峰退避**：后台余额刷新按账号稳定错峰，单轮最多分散 90 秒；连续失败 3 次后按后台轮次跳过，避免同秒齐刷和连续打击，手动刷新仍立即执行。
+- **按模型处理 6000 限流**：业务码 6000 只有在明确提示“切换其他模型”时才按模型级限流处理，仅冷却对应模型，不再冻结整个账号；明确重置时间不再被 `soft_rate_max` 截断，`Retry-After` 和无重置时间场景也能独立退避。
 
 ### v1.14.1 · 2026-10-24
 
@@ -65,8 +75,9 @@
 
 - [ptrel1/workbuddy2api-panel · `feat/balance-trend`](https://github.com/ptrel1/workbuddy2api-panel/tree/feat/balance-trend)：OpenAI Responses、Anthropic Messages 与托管搜索的协议实现参考。
 - [LeisureLinux/workbuddy2api-panel](https://github.com/LeisureLinux/workbuddy2api-panel)：本次自动任务 ID、缓存键、企业门控与账号表空白修复的主要参考。
-- [rsfree/workbuddy2api](https://github.com/rsfree/workbuddy2api)：企业会话误判与前端严格模式问题的独立修复参考。
-- [misakano7545/workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel)：出站 ID 官方形态与企业会话判据的交叉验证参考。
+- [rsfree/workbuddy2api](https://github.com/rsfree/workbuddy2api)：企业会话误判、前端严格模式与空内容 11151 防护的修复参考。
+- [misakano7545/workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel)：出站 ID 官方形态、企业会话判据、网关 401 求证与 6000 模型级限流的交叉验证参考。
+- [aibyhub/workbuddy2api-panel](https://github.com/aibyhub/workbuddy2api-panel)：超时有界换号与余额刷新错峰退避的实现参考。
 
 同时感谢 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的初代设计与 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的面板化基础。
 
@@ -293,7 +304,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.1` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.2` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -305,17 +316,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.1-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.1-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.1-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.1-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.1-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.2-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.2-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.2-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.2-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.2-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.1
+V=1.14.2
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

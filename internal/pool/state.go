@@ -30,6 +30,12 @@ func (p *Pool) Disable(uid, reason string) {
 // 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
 func (p *Pool) NoteSessionDead(uid string) bool {
+	return p.NoteSessionDeadWith(uid, sessionDeadReason)
+}
+
+// NoteSessionDeadWith 与 NoteSessionDead 共用连续失败计数和三次禁用阈值，
+// 仅允许调用方记录更具体的禁用原因。
+func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
@@ -41,7 +47,7 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 		return false
 	}
 	e.sessionDeadFails = 0
-	p.disableLocked(e, sessionDeadReason)
+	p.disableLocked(e, reason)
 	return true
 }
 
@@ -603,23 +609,23 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 拷贝一份：List 返回后 JSON 序列化在锁外进行，不能与 NoteModelCost 的
 		// 原地扣减共享底层数组（数据竞争）。
 		CreditsExpiryBuckets: append([]ExpiryBucket(nil), e.expiryBuckets...),
-		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Disabled:                 e.disabled,
-		Paused:                   e.paused,
-		SuccessCount:             e.successCount,
-		ErrTotal:                 e.errTotal,
-		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:               e.tokenUsage,
-		LastSuccessTime:          e.lastSuccess,
-		LastErrTime:              e.lastErr,
-		Until:                    e.until,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
+		Disabled:             e.disabled,
+		Paused:               e.paused,
+		SuccessCount:         e.successCount,
+		ErrTotal:             e.errTotal,
+		CheckinDone:          e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:           e.tokenUsage,
+		LastSuccessTime:      e.lastSuccess,
+		LastErrTime:          e.lastErr,
+		Until:                e.until,
+		SoftStreak:           e.softStreak,
+		ModelCosts:           p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:     e.consecutiveFails,
+		DegradeUntil:         e.degradeUntil,
+		InFlight:             int(e.inFlight.Load()),
+		BreakerFails:         e.fails,
+		BreakerUntil:         e.breakerUntil,
 	}
 	// reason 仅在冷却/禁用中透出（issue #171）：软冷却按 until 到期恢复，
 	// 但 until/coolKind/reason 字段按设计不主动清理（NoteSuccess 注释：

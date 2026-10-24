@@ -794,7 +794,7 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 
 // TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
 // （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+func TestChat6004WithoutResetUsesModelBackoff(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -817,15 +817,18 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
-	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if st.Cooling {
+		t.Fatalf("6004 without reset must not cool the whole account: %+v", st)
 	}
 	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
+		t.Fatalf("rate-limited models=%+v, want model row for glm-5.3", st.RateLimitedModels)
+	}
+	until := st.RateLimitedModels[0].Until
+	if rem := time.Until(until); rem <= 0 || rem > time.Minute {
+		t.Errorf("model cooldown remaining=%v want ~60s", rem)
+	}
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "bad" {
+		t.Fatalf("other model should still select bad, got %+v", got)
 	}
 }
 

@@ -201,37 +201,37 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	}
 }
 
-// CooldownSoftForModel 429 的**模型级**软冷却入口（issue #31）：把该模型的冷却截止
-// 精确对齐到上游重置墙钟（不做指数堆加、不做 softStreak 计数）。
-//
-//   - resetAt 非零（带解析时间）→ modelCooldowns[model].Until = min(resetAt,
-//     now+softRateMax)，ResetAt 记录上游原始墙钟（台账 ResetAt）。不写 until
-//     （全账号级冷却不受模型级限流污染），切模型即可用（模型豁免）。
-//   - resetAt 零值（无时间文案）→ 有界退避：base 起按 softStreak 翻倍、封顶
-//     softRateMax，且**在软冷却中**（until 未到期）时不推进/不延长（兜底探测不再把
-//     冷却越堆越厚）。不记录模型（不豁免）。
-//
-// 与旧实现的差异：有上游重置时间时绝对不做指数堆加；无重置时间时，「冷却中兜底
-// 探测再 429」不再 softStreak++ 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
+// CooldownSoftForModel 429 的模型级软冷却入口。
+// 非空 model 只写 modelCooldowns：明确 resetAt 完整保留，不受 softRateMax 截断；
+// 无墙钟时按该模型 Hits 做有界退避。空模型无法建立路由键，退回账号级软冷却。
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
-		if !resetAt.IsZero() {
-			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
+		if model != "" {
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
-			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.cappedSoftUntilLocked(now, resetAt),
-				ResetAt: resetAt,
-				Reason:  reason,
+			if !resetAt.IsZero() {
+				until := resetAt
+				if !until.After(now) {
+					until = now.Add(time.Millisecond)
+				}
+				e.modelCooldowns[model] = modelCooldown{Until: until, ResetAt: resetAt, Reason: reason}
+			} else {
+				hits := e.modelCooldowns[model].Hits + 1
+				e.modelCooldowns[model] = modelCooldown{
+					Until:  now.Add(p.softDurationLocked(base, hits)),
+					Reason: reason,
+					Hits:   hits,
+				}
 			}
 		} else {
-			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
-			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
-			if e.coolKind != CoolSoft || !now.Before(e.until) {
+			// 空模型无法建立独立路由键，退回账号级冷却。
+			if !resetAt.IsZero() {
+				e.until = p.cappedSoftUntilLocked(now, resetAt)
+			} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 				d := p.softDurationLocked(base, e.softStreak+1)
 				e.softStreak++
 				e.until = now.Add(d)

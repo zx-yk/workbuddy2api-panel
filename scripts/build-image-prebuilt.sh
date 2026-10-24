@@ -14,15 +14,15 @@
 # --ctx-only 的典型用法（本机没 Docker，或要在小内存机器上构建）：
 #   ./scripts/build-image-prebuilt.sh --ctx-only
 #   scp -r prebuilt-ctx root@host:/root/
-#   ssh root@host 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:1.14.1-integrated .'
+#   ssh root@host 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:1.14.2-integrated .'
 #
 # --save 的典型用法（拿不到镜像仓库、目标机不能联网拉基础镜像时）：
 #   ./scripts/build-image-prebuilt.sh --save
-#   scp bin/workbuddy2api_panel_1.14.1-integrated.tar.gz root@host:/root/
-#   ssh root@host 'gunzip -c workbuddy2api_panel_1.14.1-integrated.tar.gz | docker load'
+#   scp bin/workbuddy2api_panel_1.14.2-integrated.tar.gz root@host:/root/
+#   ssh root@host 'gunzip -c workbuddy2api_panel_1.14.2-integrated.tar.gz | docker load'
 set -euo pipefail
 
-TAG="workbuddy2api-panel:1.14.1-integrated"
+TAG="workbuddy2api-panel:1.14.2-integrated"
 SAVE=0
 CTX_ONLY=0
 for arg in "$@"; do

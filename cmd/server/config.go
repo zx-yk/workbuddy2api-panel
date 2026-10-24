@@ -22,6 +22,8 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	// TimeoutRotateExtra 传输层超时后的额外换号预算；默认 1，显式 0 关闭。
+	TimeoutRotateExtra int `json:"timeout_rotate_extra"`
 	// DNSServers 出站解析用的 DNS 服务器（空 = 系统解析器）；也可用 WB2A_DNS 覆盖。
 	// Android/magisk 模块里没有 /etc/resolv.conf，必须显式指定，否则解析全落本机 :53。
 	DNSServers []string `json:"dns_servers,omitempty"`
@@ -274,6 +276,7 @@ func Default() *Config {
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 	}
+	c.TimeoutRotateExtra = 1
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
@@ -495,6 +498,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if c.TimeoutRotateExtra < 0 {
+		return fmt.Errorf("timeout_rotate_extra: 不能为负数")
+	}
 	if c.Pool.Strategy, err = c.Pool.Strategy.Normalize(); err != nil {
 		return fmt.Errorf("pool.strategy: %w", err)
 	}

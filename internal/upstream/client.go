@@ -252,6 +252,8 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
 const modelRateLimitCode = "6004"
+const modelUsageLimitCode = "6000"
+const modelSwitchModelHint = "切换其他模型"
 
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
@@ -270,11 +272,11 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
-// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+// IsModelRateLimit 报告 429 body 是否明确指向模型级限流。
+// 6004 始终为模型级；6000 必须同时含“切换其他模型”提示，否则仍为账号级。
 func IsModelRateLimit(body string) bool {
-	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-	return reModelRateLimit.MatchString(body)
+	return reModelRateLimit.MatchString(body) ||
+		(hasBusinessCode(body, modelUsageLimitCode) && strings.Contains(body, modelSwitchModelHint))
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -410,6 +412,12 @@ func hasBusinessEnvelope(body string) bool {
 // 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
 func IsWafBlocked(status int, body string) bool {
 	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
+}
+
+// IsGatewayUnauthorized 报告 401 是否来自边缘网关而非业务层。
+// 裸 HTML、空体和纯文本没有可靠的业务判词，需要再通过 refresh 求证。
+func IsGatewayUnauthorized(status int, body string) bool {
+	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
 }
 
 // retryAfterHeaderCandidates 冷却时长优先解析的响应头候选序列：
@@ -649,6 +657,9 @@ func Classify(status int, body string) ErrKind {
 	}
 	if status >= 500 {
 		return ErrServer
+	}
+	if IsGatewayUnauthorized(status, body) {
+		return ErrSessionDead
 	}
 	// WAF 403（无业务信封的拦截形态）：判在内容策略/参数错误/通用 4xx 之前——
 	// 这些层只认带文案的 body，WAF 空体/HTML 永远不会命中它们的 marker，

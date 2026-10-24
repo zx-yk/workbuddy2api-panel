@@ -892,20 +892,18 @@ func TestCooldownSoftForModelParsedUntil(t *testing.T) {
 	}
 }
 
-func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
-	// 解析时间超出 soft_rate_max → 截断到 soft_rate_max（不无限期拉黑）。
+func TestCooldownSoftForModelNotCappedBySoftRateMax(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超过封顶 10m
-	before := time.Now()
+	reset := time.Now().Add(2 * time.Hour)
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
 	st, _ := p.Status("u1")
 	if len(st.RateLimitedModels) != 1 {
 		t.Fatalf("want model ledger row: %+v", st.RateLimitedModels)
 	}
-	if st.RateLimitedModels[0].Until.Sub(before) > 10*time.Minute+time.Second {
-		t.Errorf("model until=%v want capped at soft_rate_max=10m", st.RateLimitedModels[0].Until)
+	if !st.RateLimitedModels[0].Until.Equal(reset) {
+		t.Errorf("model until=%v want explicit reset %v", st.RateLimitedModels[0].Until, reset)
 	}
 }
 

@@ -30,10 +30,11 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool               *pool.Pool
+	Upstream           *upstream.Client
+	APIKey             string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	MaxRotate          int    // 单请求最多换号次数，默认 3
+	TimeoutRotateExtra int    // 传输层超时额外加转预算；0 关闭，不扩大 MaxRotate
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -818,6 +819,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	timeoutRotateExtra := h.cfg.TimeoutRotateExtra
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -918,12 +920,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = uerr.Status
 		}
 		if uerr == nil && terr != nil {
-			// 上游超时 / 停滞：**不换号、不罚号**。
+			// 上游超时 / 停滞：不罚号，按独立小预算有界加转。
 			//
-			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，
-			// 只会把客户端拖到 MaxRotate × header_timeout（部署值 600s 时最坏
-			// 约半小时），期间还给一串健康号喂连败计数。此前全仓没有任何超时
-			// 识别，超时和"网络抖动"共用同一条换号路径。
+			// 超时不是账号的问题：只使用 timeoutRotateExtra 的小额预算换号，
+			// 不扩大 MaxRotate，也不喂连败计数或账号冷却。
 			//
 			// 判定三态：net.Error.Timeout()（ResponseHeaderTimeout / Client.Timeout）、
 			// 显式 deadline（DeadlineExceeded / os.ErrDeadlineExceeded）、以及
@@ -933,6 +933,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
+				if timeoutRotateExtra > 0 {
+					timeoutRotateExtra--
+					fail(acct.UID)
+					log.Printf("WARN: [server] upstream timeout acct=%s: %v (extra rotation, account not penalized)",
+						logfmt.Label(acct.UID, acct.Nickname), terr)
+					if !rotateBackoff(i, r.Context()) {
+						break
+					}
+					continue
+				}
 				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
 					logfmt.Label(acct.UID, acct.Nickname), terr)
 				break
@@ -1402,8 +1412,8 @@ func rotateBackoff(i int, ctx context.Context) bool {
 // errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
 var errUpstreamTimeout = errors.New("upstream timeout")
 
-// isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
-// 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
+// isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。
+// 调用方据此走有界加转且不惩罚账号的路径。
 // 三态判定见传输层错误分支的注释。
 func isUpstreamTimeout(err error, clientGone bool) bool {
 	if err == nil {
@@ -1459,35 +1469,19 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
-		// 统一对齐上游重置时间：只要 body 带「将在 … 重置」，无论业务 code 是
-		// 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不指数堆加。
-		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型豁免。
-		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免。
-		modelRateLimited := upstream.IsModelRateLimit(body)
-		if resetAt, ok := upstream.ParseRateReset(body); ok {
-			if modelRateLimited {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
-				return
+		resetAt, _ := upstream.ParseRateReset(body)
+		if resetAt.IsZero() && uerr != nil && uerr.RetryAfter > 0 {
+			resetAt = time.Now().Add(uerr.RetryAfter)
+		}
+		if upstream.IsModelRateLimit(body) && model != "" {
+			reason := "6004 model rate limit"
+			if strings.Contains(body, "6000") {
+				reason = "6000 model rate limit"
 			}
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, reason)
 			return
 		}
-		// body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加）。
-		// 头优先于「有界退避」，但低于 body 重置文案（文案是上游更权威的口径）。
-		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
-			if modelRateLimited {
-				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
-			}
-			return
-		}
-		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
-		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
-		// （热改优先），管理面板改 soft_rate 后立即生效。
-		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
-		if modelRateLimited {
-			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
-		}
+		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶
@@ -1499,6 +1493,22 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
+		if uerr != nil && upstream.IsGatewayUnauthorized(uerr.Status, body) {
+			acct := h.cfg.Pool.AuthByUID(uid)
+			switch h.cfg.Upstream.VerifySessionByRefresh(acct) {
+			case upstream.VerifyAlive:
+				if err := acct.SaveAtomic(); err != nil {
+					log.Printf("ERR: [server] gateway 401 refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
+				}
+				h.cfg.Pool.ClearSessionDead(uid)
+				h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 recovered")
+			case upstream.VerifyDead:
+				h.cfg.Pool.NoteSessionDeadWith(uid, "gateway 401 refresh rejected")
+			default:
+				h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 inconclusive")
+			}
+			return
+		}
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：

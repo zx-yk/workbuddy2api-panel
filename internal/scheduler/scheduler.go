@@ -74,8 +74,10 @@ type Scheduler struct {
 
 	// mu/adoptTried 领养当日失败记录：uid → 自然日（CST）。门槛未达的账号当日不再重试，
 	// 避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
-	mu         sync.Mutex
-	adoptTried map[string]string
+	// mu 同时保护 balanceState 的每 UID 余额连败与待跳过后台轮数。
+	mu           sync.Mutex
+	adoptTried   map[string]string
+	balanceState map[string]balanceFailState
 
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
 	// rearmSchedule/rearmBalance/rearmSweep 是「排程已变，立即重算」通知：Run 与
@@ -99,6 +101,13 @@ type Scheduler struct {
 	lastBalanceRefresh atomic.Int64
 }
 
+// balanceFailState 是单 UID 的内存连败状态。skipRounds 只由后台轮次消费，
+// 手动刷新可以读写连败状态，但不检查或消耗待跳过轮数。
+type balanceFailState struct {
+	consecutive int
+	skipRounds  int
+}
+
 // New 构建。
 func New(cfg Config) *Scheduler {
 	if len(cfg.CheckinHours) == 0 {
@@ -119,6 +128,7 @@ func New(cfg Config) *Scheduler {
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
+		balanceState:  make(map[string]balanceFailState),
 		rearmSchedule: make(chan struct{}, 1),
 		rearmBalance:  make(chan struct{}, 1),
 		rearmSweep:    make(chan struct{}, 1),
@@ -641,17 +651,28 @@ func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
 	return out
 }
 
-// RunBalanceRefreshNow 并发查询余额并更新池内 credits。
+// RunBalanceRefreshNow 立即并发全量查询余额，供面板手动刷新使用。
+// 手动路径不错峰、不检查也不消费退避轮数，但与后台共享每 UID 连败状态。
 // 账号范围：默认跳过禁用账号；schedule.include_disabled_in_tasks 打开时一并刷新
 // （轮换用法下据此判断下一个该启用谁）。注意 ReenableIfCredits 对 disabled 是
 // no-op，所以本开关**不会**导致禁用号被自动解冻——它只让已有账号的积分保持新鲜。
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
-// 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
 func (s *Scheduler) RunBalanceRefreshNow() {
+	s.runBalanceRefresh(context.Background(), 0, false)
+}
+
+// RunBalanceRefreshStaggered 执行一轮后台余额刷新：按 UID 稳定错峰，并按后台
+// 轮次消费连败退避。ctx 取消会打断尚未开始的错峰等待。
+func (s *Scheduler) RunBalanceRefreshStaggered(ctx context.Context, interval time.Duration) {
+	s.runBalanceRefresh(ctx, interval, true)
+}
+
+func (s *Scheduler) runBalanceRefresh(ctx context.Context, interval time.Duration, background bool) {
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	spread := balanceStaggerSpread(interval)
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -660,30 +681,109 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		if a == nil {
 			continue
 		}
+		if background {
+			if skip, consecutive := s.balanceSkipRound(st.UID); skip {
+				log.Printf("balance %s: 连败 %d 次，本轮退避跳过", logfmt.Label(st.UID, a.Nickname), consecutive)
+				continue
+			}
+		}
+		offset := time.Duration(0)
+		if background {
+			offset = balanceOffset(st.UID, spread)
+		}
 		wg.Add(1)
-		go func(a *auth.Auth, uid string) {
+		go func(a *auth.Auth, uid string, offset time.Duration) {
 			defer wg.Done()
-			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
-			if err != nil {
-				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+			if !sleepCtx(ctx, offset) {
 				return
 			}
-			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
-			s.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
-				Remain:            remain,
-				Total:             total,
-				Expiring:          expiring,
-				EarliestAt:        earliestAt,
-				EarliestRemaining: earliestRemaining,
-				ExpiryBuckets:     poolExpiryBuckets(buckets),
-			})
-		}(a, st.UID)
+			s.refreshOneBalance(a, uid, expiringSoon)
+		}(a, st.UID, offset)
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())
 }
 
+func (s *Scheduler) refreshOneBalance(a *auth.Auth, uid string, expiringSoon time.Duration) {
+	remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
+	if err != nil {
+		log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+		s.balanceRecordFail(uid)
+		return
+	}
+	s.balanceRecordOK(uid)
+	s.cfg.Pool.ReenableIfCredits(uid, remain, total)
+	s.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
+		Remain:            remain,
+		Total:             total,
+		Expiring:          expiring,
+		EarliestAt:        earliestAt,
+		EarliestRemaining: earliestRemaining,
+		ExpiryBuckets:     poolExpiryBuckets(buckets),
+	})
+}
+
+// balanceStaggerSpread 后台错峰窗口为 interval/3，最长 90 秒。
+func balanceStaggerSpread(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	spread := interval / 3
+	if spread > 90*time.Second {
+		spread = 90 * time.Second
+	}
+	return spread
+}
+
+// balanceOffset 用 FNV-1a 为 UID 生成稳定偏移，范围为 [0, spread)。
+func balanceOffset(uid string, spread time.Duration) time.Duration {
+	if spread <= 0 {
+		return 0
+	}
+	var h uint32 = 2166136261
+	for i := 0; i < len(uid); i++ {
+		h ^= uint32(uid[i])
+		h *= 16777619
+	}
+	return time.Duration(uint64(h) % uint64(spread))
+}
+
+// balanceSkipRound 在后台轮次开始时消费一轮退避。被跳过的轮次不发起请求，
+// 因而不会增加连败或重新设置 skipRounds。
+func (s *Scheduler) balanceSkipRound(uid string) (bool, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.balanceState[uid]
+	if st.skipRounds == 0 {
+		return false, st.consecutive
+	}
+	st.skipRounds--
+	s.balanceState[uid] = st
+	return true, st.consecutive
+}
+
+func (s *Scheduler) balanceRecordOK(uid string) {
+	s.mu.Lock()
+	delete(s.balanceState, uid)
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) balanceRecordFail(uid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.balanceState[uid]
+	st.consecutive++
+	switch {
+	case st.consecutive == 3:
+		st.skipRounds = 1
+	case st.consecutive >= 4:
+		st.skipRounds = 2
+	}
+	s.balanceState[uid] = st
+}
+
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。
+// 启动首轮和后续定时轮都走稳定 UID 错峰与按轮次连败退避。
 // interval<=0 不启动（schedule.balance_refresh_enabled=false 时 main 不调用即可）。
 // 独立于 Run 的小时制排程：余额是分钟级观测量，不值得为它扩展 nextFire 的粒度。
 // 运行期可用 SetBalanceInterval 热改间隔（下一轮生效）。
@@ -696,7 +796,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 		// 启动即刷一轮：进程重启（含升级到带按日批次的版本）后旧 state 可能没有
 		// credits_expiry_buckets；不等第一个 ticker，首页快照就能拿到与「检查」
 		// 同口径的完整数据，避免升级后前 5 分钟仍显示旧口径。
-		s.RunBalanceRefreshNow()
+		s.RunBalanceRefreshStaggered(ctx, interval)
 		var logged time.Duration
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
@@ -721,7 +821,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 			case <-s.rearmBalance:
 				timer.Stop() // 间隔已变：立刻按新值重算
 			case <-timer.C:
-				s.RunBalanceRefreshNow()
+				s.RunBalanceRefreshStaggered(ctx, cur)
 			}
 		}
 	}()
