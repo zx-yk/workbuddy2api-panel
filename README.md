@@ -260,38 +260,73 @@ flowchart LR
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
-### 方式〇：本分支无预构建镜像
+### 方式〇：直接拉现成产物（推荐）
 
-> ⚠️ 上游的 `ghcr.io/linguo2625469/workbuddy2api-panel:*` 停在 **1.13.0**，**不含本分支的多协议入站**。直接拉它、再把客户端指到 `/v1/responses` 或 `/v1/messages`，只会拿到 404/401——别混用。
+CI 会随 `integrated` 分支与 `v*` tag 自动产出两种成品，**不需要自己编译**。
 
-四条自建路径，按机器条件选：
+**A. Docker 镜像（linux/amd64 + linux/arm64）**
 
 ```bash
-# A. 本地编译 + 目标机只 COPY（推荐：小内存机器 / 本机没装 Docker）
-./scripts/build-image-prebuilt.sh --ctx-only        # 本机交叉编译四个二进制 + 组装 24M 上下文
-scp -r prebuilt-ctx root@<host>:/root/              # 传上去
-ssh root@<host> 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:1.14.0-integrated .'
-# 目标机零编译：镜像里只有 COPY，实测 build 13s、41.7MB（1.7G 内存机器上面跑得动）
-# 本机装了 Docker 的话可省掉传输：./scripts/build-image-prebuilt.sh
-# 拿不到镜像仓库时导出成 tar：./scripts/build-image-prebuilt.sh --save → docker load
+docker pull ghcr.io/zx-yk/workbuddy2api-panel:latest
 
-# B. 直接在目标机构建（要 ≥4G 内存，build 阶段 go build 峰值约 1G）
-git clone https://github.com/zx-yk/workbuddy2api-panel.git   # integrated 已是默认分支
-cd workbuddy2api-panel
-docker build -t workbuddy2api-panel:1.14.0-integrated .
-
-# C. 不要 Docker，直接跑静态二进制
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
-  -o wb2api ./cmd/server
-# 8.6M 单文件，无外部依赖，配合 ./auths ./data ./config.json 即可运行
-
-# D. 让 GitHub Actions 自己发镜像
-#    前提：fork 会默认禁用 workflows，先到 Actions 页点「I understand my workflows, go ahead and enable them」
-#    然后 Actions → docker-ghcr → Run workflow（分支选 integrated）→ 产物推 ghcr.io/<你的账号>/workbuddy2api-panel
-#    ⚠️ workflow 的自动触发分支写的是 main，push 到 integrated 不会自动构建，只能手动 dispatch
-
-# 最后一步都一样：docker-compose.yml 里 image 换成新 tag，再 up -d
+docker run -d --name workbuddy2api \
+  -p 7863:7863 -e TZ=Asia/Shanghai \
+  -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
+  ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
+
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.0` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
+
+> 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
+> fork 到自己的账号时，新包默认继承仓库可见性（公开仓库 → 公开包）；只有私有仓库才需要 `docker login` + PAT（`read:packages`）。
+
+**B. 现成二进制（GitHub Release）**
+
+每个 `v*` tag 会产出五平台包，见 [Releases](https://github.com/zx-yk/workbuddy2api-panel/releases)：
+
+| 资产 | 说明 |
+|---|---|
+| `wb2api-panel-v1.14.0-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.0-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.0-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.0-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.0-windows-amd64.zip` | Windows |
+| `checksums.txt` | 全部资产的 sha256 |
+
+每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
+
+```bash
+V=1.14.0
+curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
+curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
+grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
+
+mkdir -p /opt/wb2api-panel && tar xzf wb2api-panel-v${V}-linux-amd64.tar.gz -C /opt/wb2api-panel
+cd /opt/wb2api-panel && cp config.example.json config.json && ./wb2api -config config.json
+```
+
+解包后就是运行结构：三个 `.sh` 自身会 `cd $(dirname $0)`，与二进制同目录即可直接跑 `./signin.sh`、`./login.sh`、`./credit.sh`。
+
+**C. 自己构建（改了代码、或要接自建 registry 时）**
+
+```bash
+# C1. 本机编译 + 目标机只 COPY（小内存机器、或本机没装 Docker）
+./scripts/build-image-prebuilt.sh --ctx-only     # 交叉编译四个二进制 + 组装 24M 上下文
+scp -r prebuilt-ctx root@<host>:/root/
+ssh root@<host> 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:dev .'
+# 目标机零编译，实测 41.7MB / 13s（1.7G 内存机器跑得动）；本机有 Docker 可省传输，--save 可导出 tar
+
+# C2. 目标机直接构建（需 ≥4G 内存，build 阶段 go build 峰值约 1G）
+git clone https://github.com/zx-yk/workbuddy2api-panel.git
+cd workbuddy2api-panel && docker build -t workbuddy2api-panel:dev .
+
+# C3. 不要 Docker，只跑单文件（8.6M，无外部依赖）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o wb2api ./cmd/server
+```
+
+> **CI 触发规则**（自己改流水线时看）：push 到 `integrated` → 测试 + 五平台编译 + 多架构镜像；打 `v*` tag → 额外生成语义化镜像 tag 与 Release 资产；PR 仅构建验证不发布。**`main` 是上游镜像快照，刻意不触发**，避免误发不含整合端点的旧版。
+> 新 fork 的仓库，GitHub 默认禁用 workflows，需先到 Actions 页点一次「I understand my workflows, go ahead and enable them」。
 
 > **国内构建的坑**：`Dockerfile.prebuilt` 的 `apk add` 默认走 `mirrors.aliyun.com`。走官方 `dl-cdn.alpinelinux.org` 实测单次 build 卡了 13 分钟没动，换源后 13 秒完成。国外构建可 `--build-arg APK_MIRROR=dl-cdn.alpinelinux.org` 覆盖。
 
