@@ -105,6 +105,18 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 	return out
 }
 
+// StickyEligibleForModelRealm 判断已有绑定能否保留：只看账号与模型健康，
+// 不看在途名额。新会话分配仍使用 AvailableUIDsForModelRealm。
+func (p *Pool) StickyEligibleForModelRealm(uid, model, realm string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok || (realm != "" && e.a.Realm() != realm) {
+		return false
+	}
+	return e.healthyForModel(time.Now(), model)
+}
+
 // AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号
 // （6004 模型豁免照常生效）。realm=="" 退化为 AvailableUIDsForModel。
 func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {

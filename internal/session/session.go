@@ -41,6 +41,9 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// StickyUsable 校验已有绑定，不看在途名额；AvailableForModel 仍用于新会话分配。
+	// nil 时回落 AvailableForModel，保留旧调用方语义。
+	StickyUsable func(uid, model string) bool
 }
 
 // Router 会话粘性路由器。
@@ -141,11 +144,10 @@ func (r *Router) Resolve(key string) (string, bool) {
 // 有序账号池策略用它保留粘性，未绑定会话由 Pool 选号并在成功后 Bind。
 func (r *Router) LookupForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, found := r.entries[key]
-	if !found || expired(e, now, r.cfg.TTL) || !available[e.uid] {
+	if !found || expired(e, now, r.cfg.TTL) || !r.stickyOK(e.uid, model) {
 		return "", false
 	}
 	r.entries[key] = entry{uid: e.uid, lastActive: now}
@@ -162,18 +164,17 @@ func (r *Router) LookupForModel(key, model string) (string, bool) {
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
-		if available[e.uid] {
+		if r.stickyOK(e.uid, model) {
 			r.touch(key, e.uid, now)
 			return e.uid, true
 		}
-		// 绑定号已冷却/占满 → 失效，落入慢路径重分配。
+		// 绑定号持久失效才重分配；在途满载由 StickyUsable 排除在失效判据之外。
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
@@ -182,7 +183,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
-		if available[e2.uid] {
+		if r.stickyOK(e2.uid, model) {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}
@@ -280,6 +281,17 @@ func (r *Router) gcOnce(now time.Time) int {
 		r.cfg.Store.DelBind(key)
 	}
 	return len(expiredKeys)
+}
+
+// stickyOK 校验已有绑定；未注入 StickyUsable 时保持旧的可用列表口径。
+func (r *Router) stickyOK(uid, model string) bool {
+	if uid == "" {
+		return false
+	}
+	if r.cfg.StickyUsable != nil {
+		return r.cfg.StickyUsable(uid, model)
+	}
+	return r.availableSet(model)[uid]
 }
 
 // availableSet 把 AvailableForModel(model) 的有序列表转集合（快路径命中校验用）。

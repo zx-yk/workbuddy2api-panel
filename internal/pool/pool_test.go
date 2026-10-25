@@ -1520,6 +1520,21 @@ func TestPickSkipsInFlightFull(t *testing.T) {
 	p.Release("full")
 }
 
+func TestPickStickyDistinguishesBusyFromUnusable(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetMaxInFlight(1)
+	p.Acquire("u1")
+	if a, why := p.PickStickyForModel("u1", "m"); a != nil || why != StickyBusy {
+		t.Fatalf("full sticky = (%v, %v), want (nil, StickyBusy)", a, why)
+	}
+	p.Release("u1")
+	p.Cooldown("u1", CoolSoft, time.Minute, "test")
+	if a, why := p.PickStickyForModel("u1", "m"); a != nil || why != StickyUnusable {
+		t.Fatalf("cooling sticky = (%v, %v), want (nil, StickyUnusable)", a, why)
+	}
+}
+
 func TestInFlightCountNotExceedLimit(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})

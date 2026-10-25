@@ -422,39 +422,46 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	return uids
 }
 
-// PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验：绑定号在当前模型被
-// 6004 限流时返回 nil，让调用方（handler）解绑并回落普通轮换。
-// 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
-// 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
+// PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验。
 func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+	a, _ := p.PickStickyForModel(uid, model)
+	return a
+}
+
+// StickyPickResult 区分粘性号临时满载与持久不可用。
+type StickyPickResult int
+
+const (
+	StickyPicked StickyPickResult = iota
+	StickyBusy
+	StickyUnusable
+)
+
+// PickStickyForModel 返回粘性号及未选中的原因。仅在途满载是 StickyBusy，
+// 调用方应保留绑定；账号/模型不健康或积分保底拦截则 StickyUnusable。
+func (p *Pool) PickStickyForModel(uid, model string) (*auth.Auth, StickyPickResult) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
-		return nil
+		return nil, StickyUnusable
 	}
 	now := time.Now()
 	if !e.healthyForModel(now, model) {
-		return nil
+		return nil, StickyUnusable
 	}
-	// 积分保底（粘性路径）：与 pick 的 floorBlocked 同判据——触底 + 收费即拦
-	// （判据含上游目录倍率兜底，realm 取账号所属域——粘性号已确定，无需外部传入）。
-	// 返回 nil 后 handler 侧解绑粘性（unbindSticky）走普通轮换换号，粘性号回血
-	// 后下次会话重新绑定。
-	// 日志频次：天然每请求至多一条——首次返回 nil 即解绑，后续轮转不再调入本路径
-	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
 	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
 		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
-		return nil
+		return nil, StickyUnusable
 	}
 	if p.inFlightFull(e) {
-		return nil
+		return nil, StickyBusy
 	}
 	e.lastUsed = now
 	p.pickSeq++
 	e.usedSeq = p.pickSeq
-	return e.a
+	return e.a, StickyPicked
 }
 
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；

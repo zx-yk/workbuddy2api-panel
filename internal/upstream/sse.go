@@ -24,6 +24,18 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// streamReadError 标记上游响应体的读失败，与写给客户端时的写失败区分。
+type streamReadError struct{ err error }
+
+func (e *streamReadError) Error() string { return "upstream stream read: " + e.err.Error() }
+func (e *streamReadError) Unwrap() error { return e.err }
+
+// IsStreamReadError 报告流是否在上游读取侧中断。客户端写失败不属于此类。
+func IsStreamReadError(err error) bool {
+	var readErr *streamReadError
+	return errors.As(err, &readErr)
+}
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -738,7 +750,10 @@ readLoop:
 			if err == io.EOF {
 				break
 			}
-			return err
+			// HTTP 头已发出，补明确的错误终态；仍返回读错误供账号与日志处置。
+			_ = writeSSE(`{"error":{"message":"upstream stream interrupted","type":"upstream_error","code":"upstream_parse"}}`)
+			_ = writeSSE(`[DONE]`)
+			return &streamReadError{err: err}
 		}
 	}
 	// 标记修复的尾部收尾：流结束时仍未判定的字节一律原文回吐（绝不吞字节，未闭合

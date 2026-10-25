@@ -129,6 +129,27 @@ func TestBoundAccountCooldownReassigns(t *testing.T) {
 	}
 }
 
+func TestStickyUsableKeepsBusyBinding(t *testing.T) {
+	st := newCountingStore()
+	r := New(Config{
+		TTL:          time.Minute,
+		Store:        st,
+		Available:    func() []string { return []string{"other"} },
+		StickyUsable: func(uid, model string) bool { return uid == "busy" },
+	})
+	r.Bind("conv", "busy")
+	for name, resolve := range map[string]func(string, string) (string, bool){
+		"resolve": r.ResolveForModel,
+		"lookup":  r.LookupForModel,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if uid, ok := resolve("conv", "m"); !ok || uid != "busy" {
+				t.Fatalf("busy binding moved to %s ok=%v", uid, ok)
+			}
+		})
+	}
+}
+
 func TestNoSessionKeyPassthrough(t *testing.T) {
 	// ExtractKey 找不到任何会话键 → 空串（调用方据空串走普通 Pick；router 不会被调用）。
 	got := ExtractKey([]byte(`{"model":"x","messages":[]}`))

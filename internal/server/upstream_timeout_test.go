@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -123,6 +124,24 @@ func TestUpstreamTimeoutExtraBudgetExhausted(t *testing.T) {
 		if st.Cooling || st.Disabled || st.BreakerFails != 0 || st.ConsecutiveFails != 0 || st.ErrTotal != 0 || st.InFlight != 0 {
 			t.Fatalf("timeout must leave no penalty or lease on %s: %+v", uid, st)
 		}
+	}
+}
+
+func TestUpstreamTimeoutWithoutExtraReleasesSticky(t *testing.T) {
+	hit := map[string]int{}
+	up := testTimeoutUpstream(hit, map[string]bool{"Bearer at-bad": true})
+	p := testPoolWith(&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999})
+	sess := session.New(session.Config{Available: func() []string { return []string{"bad"} }})
+	sess.Bind("conv-timeout", "bad")
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, TimeoutRotateExtra: 0})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-timeout"}}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if _, ok := sess.LookupForModel("conv-timeout", "glm-5.2"); ok {
+		t.Fatal("terminal timeout must release sticky binding")
 	}
 }
 

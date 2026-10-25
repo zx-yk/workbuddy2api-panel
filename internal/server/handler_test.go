@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,25 @@ func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body 
 				StatusCode: status,
 				Header:     http.Header{"Content-Type": []string{ct}},
 				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+}
+
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func newReadFailureUpstream(prefix string) *upstream.Client {
+	return &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(io.MultiReader(strings.NewReader(prefix),
+					errorReader{errors.New("forced upstream read failure")})),
 			}, nil
 		})},
 		ChatBaseCN:    "https://fake.example",
@@ -624,8 +644,40 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	}
 }
 
-// TestChatStickyFullFallsBackToRotation 端到端验证 C3 语义：粘性号满载不可用时，
-// 请求在同一轮内解绑并回落普通轮换选中健康账号，绑定收敛到最终成功号——而非空耗一轮。
+func TestChatUpstreamReadFailureDoesNotSucceedOrKeepSticky(t *testing.T) {
+	prefix := strings.Split(sseOK, "data: [DONE]")[0]
+	for _, stream := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stream", false: "non-stream"}[stream], func(t *testing.T) {
+			st := newBindStore()
+			sess := session.New(session.Config{TTL: time.Minute, Store: st,
+				Available: func() []string { return []string{"u1"} }})
+			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+			h := NewHandler(Config{Pool: p, Upstream: newReadFailureUpstream(prefix), Session: sess})
+			sess.Bind("conv-read", "u1")
+			body := fmt.Sprintf(`{"model":"glm-5.2","stream":%t,"messages":[],"metadata":{"conversation_id":"conv-read"}}`, stream)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+			if stream {
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "upstream stream interrupted") ||
+					!strings.Contains(rec.Body.String(), "data: [DONE]") {
+					t.Fatalf("stream response code=%d body=%s", rec.Code, rec.Body)
+				}
+			} else if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "forced upstream read failure") {
+				t.Fatalf("non-stream response code=%d body=%s", rec.Code, rec.Body)
+			}
+			account, _ := p.Status("u1")
+			if account.SuccessCount != 0 {
+				t.Fatalf("interrupted upstream must not count as success: %+v", account)
+			}
+			if uid, ok := st.lastUID("conv-read"); ok {
+				t.Fatalf("failed account must release sticky binding, still bound to %s", uid)
+			}
+		})
+	}
+}
+
+// TestChatStickyFullFallsBackToRotation 粘性号满载时本次可溢出到健康账号，
+// 但绑定保留在原号；即使整池随后满载，也不能把临时压力变成永久搬号。
 func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
@@ -637,7 +689,7 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// bad 占满唯一在途名额：PickByUID 将返回 nil（healthy 但 inFlight 满）→ 解绑 + 回落轮换。
+	// bad 占满唯一在途名额：本次回落轮换，但不解绑。
 	p.SetMaxInFlight(1)
 	p.Acquire("bad")
 
@@ -657,11 +709,21 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
-		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("temporary overflow must keep original binding, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	}
+	// 整池满载时选不到任何号，绑定仍须保留。
+	p.Acquire("good")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("all-full code=%d body=%s", rec.Code, rec.Body)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("all-full must not clear binding, got %s ok=%v", uid, ok)
 	}
 	p.Release("bad")
+	p.Release("good")
 }
 
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {

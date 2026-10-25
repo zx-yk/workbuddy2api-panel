@@ -820,16 +820,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	timeoutRotateExtra := h.cfg.TimeoutRotateExtra
+	// stickyOverflow 表示本次只是从满载的绑定号临时溢出；成功后不改绑。
+	stickyOverflow := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		stickyOverflow = false
+		// 选号：粘性号优先，临时满载与持久不可用分别处理。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			// 跨域回退开启且请求为裸名时，粘性号可以落在任一域（回退成功后绑定的是另一域
-			// 的账号，下一轮不该被 realm 校验立刻解绑）。
-			if acct == nil || (realm != "" && acct.Realm() != realm && !crossRealm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
-				// 本次回落普通轮换。
+			var why pool.StickyPickResult
+			acct, why = h.cfg.Pool.PickStickyForModel(stickyUID, bareModel)
+			switch {
+			case acct == nil && why == pool.StickyBusy:
+				stickyOverflow = true
+			case acct == nil:
+				unbindSticky()
+			case realm != "" && acct.Realm() != realm && !crossRealm:
+				// 跨域回退开启且请求为裸名时，允许绑定号落在任一域。
 				unbindSticky()
 				acct = nil
 			}
@@ -874,10 +880,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		if !h.cfg.Pool.Acquire(acct.UID) {
-			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
-			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
+			// 压线抢不到粘性号名额也属于临时满载，保留原绑定。
 			if stickyUID != "" && acct.UID == stickyUID {
-				unbindSticky()
+				stickyOverflow = true
 			}
 			if !rotateBackoff(i, r.Context()) {
 				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
@@ -945,6 +950,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
 					logfmt.Label(acct.UID, acct.Nickname), terr)
+				fail(acct.UID)
 				break
 			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
@@ -1130,13 +1136,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+			case upstream.IsStreamReadError(sErr) && r.Context().Err() == nil:
+				// 上游读中断而客户端仍在线：不是成功，也不是客户端断连。
+				st.status = http.StatusBadGateway
+				st.outcome = reqlog.OutcomeStreamError
+				h.cfg.Pool.NoteFailures(acct.UID)
+				fail(acct.UID)
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream stream interrupted: %v",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, sErr)
 			case sErr != nil:
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
 				st.outcome = reqlog.OutcomeInterrupted
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.cfg.Session != nil {
+				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			default:
@@ -1148,7 +1162,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.cfg.Session != nil {
+				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			}
@@ -1195,6 +1209,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			fail(acct.UID)
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
@@ -1229,7 +1244,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil {
+		if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
