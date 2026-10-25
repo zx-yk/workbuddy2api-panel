@@ -830,6 +830,19 @@ func (w *messagesWriter) handleFrame(frame string) error {
 	if w.x.failed || w.x.done {
 		return nil
 	}
+	// SSE 注释帧不属于 Anthropic 事件，但必须透传给客户端维持连接活跃；
+	// 否则 StreamHint 的静默保活会被协议转换层吞掉。
+	if strings.HasPrefix(frame, ":") {
+		if !w.hdrSent {
+			w.ResponseWriter.WriteHeader(http.StatusOK)
+			w.hdrSent = true
+		}
+		if _, err := io.WriteString(w.ResponseWriter, frame+"\n\n"); err != nil {
+			return err
+		}
+		w.Flush()
+		return nil
+	}
 	if strings.HasPrefix(frame, "data: [DONE]") {
 		return w.closeAndStop()
 	}

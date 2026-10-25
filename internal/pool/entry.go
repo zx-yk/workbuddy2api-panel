@@ -178,6 +178,9 @@ type modelCooldown struct {
 	// AuditOnly 为 true 时仅用于状态展示（例如无重置时间的 6004），
 	// healthyForModel 与 modelExempt 必须忽略它，避免改变选号行为。
 	AuditOnly bool
+	// Capacity 为 true 时表示 14003 这类暂时性模型容量避让：新会话严格避开，
+	// 已有粘性绑定可保留并继续尝试；其他模型冷却不适用该宽松语义。
+	Capacity bool
 }
 
 // modelCostTTL 成本观测的有效期。取 6 小时：既覆盖"夜间免费"这类时段性优惠的
@@ -354,11 +357,22 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 		return false
 	}
 	if e.modelCooled(now, reqModel) {
-		// 该模型在 6004 独立冷却中 → 不可选。
 		return false
 	}
-	// 账号级冷却/熔断先判；若未冷却则由账号级健康决定。
 	return e.healthy(now)
+}
+
+// stickyHealthyForModel 校验已有会话绑定。普通选号仍严格排除所有模型冷却；
+// 仅 14003 容量短窗口允许保留并继续使用原绑定，账号级故障与其他模型冷却不放行。
+func (e *entry) stickyHealthyForModel(now time.Time, reqModel string) bool {
+	if !e.healthy(now) {
+		return false
+	}
+	mc, ok := e.modelCooldowns[reqModel]
+	if !ok || mc.AuditOnly || mc.Until.IsZero() || !now.Before(mc.Until) {
+		return true
+	}
+	return mc.Capacity
 }
 
 // pruneExpiredModelCosts 删除 modelCost 中已过期的条目（惰性清理，与
@@ -505,6 +519,7 @@ type stateModelCooldown struct {
 	ResetAt   time.Time `json:"reset_at,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	AuditOnly bool      `json:"audit_only,omitempty"`
+	Capacity  bool      `json:"capacity,omitempty"`
 }
 
 // stateModelCost 单个 (账号, 模型) 的成本观测持久化记录，与运行态 modelCostEntry

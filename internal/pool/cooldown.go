@@ -244,6 +244,57 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	}
 }
 
+const (
+	modelBusyBase = 10 * time.Second
+	modelBusyMax  = time.Minute
+)
+
+// CooldownModelBusy 记录 14003 的 (账号,模型) 暂时性容量避让。
+// 默认 10 秒起、最多 1 分钟；有效窗口内重复命中不持续延长。显式 Retry-After
+// 也在 1 分钟短窗口内截断。已有更晚的模型冷却不被覆盖或降级成容量类型。
+func (p *Pool) CooldownModelBusy(uid, model string, retryAfter time.Duration, reason string) {
+	if uid == "" || model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	old, exists := e.modelCooldowns[model]
+	if exists && !old.AuditOnly && old.Until.After(now) {
+		return
+	}
+	if retryAfter > 0 {
+		if retryAfter > modelBusyMax {
+			retryAfter = modelBusyMax
+		}
+	} else {
+		hits := old.Hits + 1
+		retryAfter = modelBusyBase
+		if hits > 1 {
+			shift := hits - 1
+			if shift > 3 {
+				shift = 3
+			}
+			retryAfter <<= uint(shift)
+			if retryAfter > modelBusyMax {
+				retryAfter = modelBusyMax
+			}
+		}
+		old.Hits++
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = map[string]modelCooldown{}
+	}
+	e.modelCooldowns[model] = modelCooldown{
+		Until: now.Add(retryAfter), Reason: reason, Hits: old.Hits, Capacity: true,
+	}
+	p.dirty.Store(true)
+}
+
 // RecordModelRateLimitAudit 记录无法参与模型路由的 6004 展示项。
 // 典型场景是 6004 没有可解析重置时间：账号仍按原有有界退避冷却，
 // 本方法只把模型名挂到 e.until 上供账号页展示，不影响 healthyForModel。
@@ -366,10 +417,11 @@ func (p *Pool) BlockModelClear(uid, model string) {
 
 // ModelBlockStatus 描述某模型在全池范围内因模型级冷却而不可选的情况。
 type ModelBlockStatus struct {
-	Blocked bool      // true = 每个非禁用账号都对该模型处于冷却中
-	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
-	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
-	Count   int       // 因此被挡的账号数
+	Blocked  bool      // true = 每个非禁用账号都对该模型处于冷却中
+	Reason   string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
+	Until    time.Time // 最早解封时间（零值 = 上游未给重置时刻）
+	Count    int       // 因此被挡的账号数
+	Capacity bool      // true = 所有阻塞均为 14003 暂时性容量窗口，可 503 重试
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
@@ -401,7 +453,7 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 	defer p.mu.Unlock()
 	now := time.Now()
 
-	var st ModelBlockStatus
+	st := ModelBlockStatus{Capacity: true}
 	for _, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
@@ -417,6 +469,9 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 		}
 		st.Count++
 		if mc, ok := e.modelCooldowns[model]; ok {
+			if !mc.Capacity {
+				st.Capacity = false
+			}
 			if st.Reason == "" {
 				st.Reason = mc.Reason
 			}

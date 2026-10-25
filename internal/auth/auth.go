@@ -304,6 +304,9 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken:  f.DeviceToken,
 		}
 	}
+	if a.ExpiresAt > 100000000000 {
+		a.ExpiresAt /= 1000
+	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}

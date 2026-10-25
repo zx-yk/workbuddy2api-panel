@@ -203,7 +203,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				if e.modelCooldowns == nil {
 					e.modelCooldowns = map[string]modelCooldown{}
 				}
-				e.modelCooldowns[m] = modelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
+				e.modelCooldowns[m] = modelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly, Capacity: mc.Capacity}
 			}
 		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
@@ -334,7 +334,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 				if s.ModelCooldowns == nil {
 					s.ModelCooldowns = map[string]stateModelCooldown{}
 				}
-				s.ModelCooldowns[m] = stateModelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
+				s.ModelCooldowns[m] = stateModelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly, Capacity: mc.Capacity}
 			}
 		}
 		// 成本账本：惰性过滤过期观测（modelCostTTL 外不写——陈旧价格不复活）。

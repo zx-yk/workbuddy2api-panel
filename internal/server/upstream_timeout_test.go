@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -34,6 +35,11 @@ func TestIsUpstreamTimeout(t *testing.T) {
 	}{
 		{"net.Error 超时", timeoutErr{true}, false, true},
 		{"net.Error 非超时（连接被拒）", timeoutErr{false}, false, false},
+		{"DNS 超时不算上游停滞", &net.DNSError{Err: "i/o timeout", Name: "fake.example", IsTimeout: true}, false, false},
+		{"dial 超时不算上游停滞", &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{true}}, false, false},
+		{"dial deadline 不算上游停滞", fmt.Errorf("request: %w", &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}), false, false},
+		{"TLS 握手超时不算上游停滞", errors.New("net/http: TLS handshake timeout"), false, false},
+		{"已建连响应超时仍算上游超时", &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{true}}, false, true},
 		{"显式 deadline", fmt.Errorf("read: %w", context.DeadlineExceeded), false, true},
 		{"客户端断连（ctx 已取消）", context.Canceled, true, false},
 		{"空闲看门狗掐流（客户端仍在）", context.Canceled, false, true},
@@ -51,6 +57,24 @@ func TestIsUpstreamTimeout(t *testing.T) {
 	// 保证 stub 真的实现了 net.Error（否则上面的用例会静默走不到 Timeout 分支）
 	var ne net.Error = timeoutErr{true}
 	_ = ne
+}
+
+func TestRetryAfterHeaderRoundsUp(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "1"},
+		{time.Nanosecond, "1"},
+		{time.Second, "1"},
+		{1001 * time.Millisecond, "2"},
+		{7 * time.Second, "7"},
+	}
+	for _, tc := range cases {
+		if got := retryAfterHeader(tc.d); got != tc.want {
+			t.Errorf("retryAfterHeader(%v)=%q want %q", tc.d, got, tc.want)
+		}
+	}
 }
 
 func testTimeoutUpstream(hit map[string]int, timeoutAuths map[string]bool) *upstream.Client {

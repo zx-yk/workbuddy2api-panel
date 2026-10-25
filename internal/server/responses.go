@@ -997,6 +997,19 @@ func (w *responsesWriter) handleFrame(frame string) error {
 	if w.x.failed || w.x.completed {
 		return nil
 	}
+	// 注释保活不属于 Responses 数据事件，原样转发即可；吞掉会让长思考期
+	// 在协议转换后重新变成静默连接。
+	if strings.HasPrefix(frame, ":") {
+		if !w.hdrSent {
+			w.ResponseWriter.WriteHeader(http.StatusOK)
+			w.hdrSent = true
+		}
+		if _, err := io.WriteString(w.ResponseWriter, frame+"\n\n"); err != nil {
+			return err
+		}
+		w.Flush()
+		return nil
+	}
 	if strings.HasPrefix(frame, "data: [DONE]") {
 		w.x.sawDone = true
 		_ = w.closeOpenItems()

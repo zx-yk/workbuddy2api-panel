@@ -447,7 +447,7 @@ func (p *Pool) PickStickyForModel(uid, model string) (*auth.Auth, StickyPickResu
 		return nil, StickyUnusable
 	}
 	now := time.Now()
-	if !e.healthyForModel(now, model) {
+	if !e.stickyHealthyForModel(now, model) {
 		return nil, StickyUnusable
 	}
 	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {

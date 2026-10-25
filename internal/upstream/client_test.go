@@ -111,6 +111,15 @@ func TestClassify(t *testing.T) {
 		{429, `{"error":{"data":{"code":"14018","msg":"Credits exhausted"}}}`, ErrHardCredit},
 		{429, `{"requestId":"14018","msg":"Credits exhausted"}`, ErrSoftRate},
 		{429, `{"code":1,"msg":"Credits exhausted"}`, ErrSoftRate},
+		// 14003 是 (账号,模型) 容量短窗口，不是账号级 429；6020 与 6021
+		// 同属渠道容量信号。只认结构化 code，requestId 撞数字不得误判。
+		{429, `{"code":14003,"msg":"model capacity busy"}`, ErrModelBusy},
+		{503, `{"error":{"data":{"code":"14003","msg":"model capacity busy"}}}`, ErrModelBusy},
+		{429, `{"requestId":"14003","msg":"too many requests"}`, ErrSoftRate},
+		{429, `{"code":6004,"msg":"model rate limit"}`, ErrSoftRate},
+		{429, `{"code":6020,"msg":"queue.waiting"}`, ErrUpstreamBusy},
+		{503, `{"error":{"data":{"code":"6020","msg":"queue.waiting"}}}`, ErrUpstreamBusy},
+		{429, `{"requestId":"6020","msg":"too many requests"}`, ErrSoftRate},
 		// 6021「queue.full.title」渠道级容量满载（2026-10-15 实案）：不是账号问题，
 		// 必须归 ErrUpstreamBusy（不罚号不轮转）——按 ErrSoftRate 逐号软冷却会在
 		// 秒级把整池健康号误杀。结构化 code 与固定文案双判据。
@@ -694,5 +703,42 @@ func TestClassifyRealChannelRefusedBody(t *testing.T) {
 	}
 	if got := Classify(403, `{"code":"`+code+`","msg":"request illegal"}`); got != ErrChannelRefused {
 		t.Fatalf("Classify(real 11-128, 403)=%v want ErrChannelRefused", got)
+	}
+}
+
+func TestQueueRetryAfter(t *testing.T) {
+	cases := []struct {
+		body string
+		want time.Duration
+	}{
+		{`{"code":6020,"data":{"retry_after":7}}`, 7 * time.Second},
+		{`{"code":6021,"data":{"retry_after":2.25}}`, 2250 * time.Millisecond},
+		{`{"code":6021,"data":{"retry_after":0}}`, 0},
+		{`{"code":6021,"data":{"retry_after":-1}}`, 0},
+		{`{"code":6021,"data":{"retry_after":601}}`, 0},
+		{`{"code":6021,"data":{}}`, 0},
+		{`not json`, 0},
+	}
+	for _, tc := range cases {
+		if got := QueueRetryAfter(tc.body); got != tc.want {
+			t.Errorf("QueueRetryAfter(%s)=%v want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+func TestFrameKindPreservesCapacityCodes(t *testing.T) {
+	cases := []struct {
+		payload string
+		want    ErrKind
+	}{
+		{`{"error":{"code":14003,"message":"model busy"}}`, ErrModelBusy},
+		{`{"error":{"code":"6020","message":"queue waiting"}}`, ErrUpstreamBusy},
+		{`{"error":{"code":6021,"message":"queue full"}}`, ErrUpstreamBusy},
+		{`{"error":{"code":6004,"message":"model rate limit"}}`, ErrSoftRate},
+	}
+	for _, tc := range cases {
+		if got := FrameKind(tc.payload); got != tc.want {
+			t.Errorf("FrameKind(%s)=%v want %v", tc.payload, got, tc.want)
+		}
 	}
 }

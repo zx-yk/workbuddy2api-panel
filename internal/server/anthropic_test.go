@@ -501,6 +501,23 @@ func TestMessagesAuthXAPIKey(t *testing.T) {
 	}
 }
 
+func TestMessagesStreamForwardsSSEComments(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &messagesWriter{ResponseWriter: rec, stream: true}
+	raw := ": ping\n\ndata: {\"id\":\"chatcmpl-1\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"}}]}\n\ndata: [DONE]\n\n"
+	if err := upstream.StreamHint(rw, strings.NewReader(raw), nil); err != nil {
+		t.Fatal(err)
+	}
+	rw.finish()
+	body := rec.Body.String()
+	if !strings.Contains(body, ": ping\n\n") {
+		t.Fatalf("Messages 转换层丢弃了 SSE 保活注释：%q", body)
+	}
+	if !strings.Contains(body, `"type":"message_start"`) || !strings.Contains(body, `"text":"你好"`) {
+		t.Fatalf("保活转发影响正常事件：%q", body)
+	}
+}
+
 func TestMessagesInvalidJSON(t *testing.T) {
 	_, _, err := messagesToChat([]byte(`{`))
 	if err == nil {

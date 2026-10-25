@@ -386,6 +386,161 @@ func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
 	}
 }
 
+const (
+	dshGUIA = "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names."
+	dshGUIB = `When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.`
+)
+
+func TestIdentitySentenceRewritten(t *testing.T) {
+	cases := map[string]string{
+		"You are an AI agent powered by DeepSeek Harness.":                                    "You are a helpful AI assistant.",
+		"You are an AI assistant built on DeepSeek. Use tools wisely.":                        "You are a helpful AI assistant. Use tools wisely.",
+		"You are Codex Agent, built by OpenAI.":                                               "You are a helpful AI assistant.",
+		"You are an assistant created by Example. Next.":                                      "You are a helpful AI assistant. Next.",
+		"You are a model developed by Example.":                                               "You are a helpful AI assistant.",
+		"You are the AI made by Example.":                                                     "You are a helpful AI assistant.",
+		"you are an llm TRAINED BY someone.":                                                  "You are a helpful AI assistant.",
+		"You are powered by the model named Claude Opus 4.5. The exact model ID is x-4-5.":    "You are a helpful AI assistant. The exact model ID is x-4-5.",
+		"Intro.\nYou are a coding agent powered by the deepseek-v4.1-flash model.\nTools: a.": "Intro.\nYou are a helpful AI assistant.\nTools: a.",
+		"You are an AI agent powered by DeepSeek Harness\nnext line":                          "You are a helpful AI assistant.\nnext line",
+	}
+	for in, want := range cases {
+		if got := sanitizeText(in); got != want {
+			t.Errorf("sanitizeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIdentityLookalikeNotTouched(t *testing.T) {
+	for _, in := range []string{
+		"You are free to use tools built by the community.",
+		"This plugin is powered by DeepSeek and made by volunteers.",
+		"You are an agent. The CLI was built by OpenAI.",
+	} {
+		if got := sanitizeText(in); got != in {
+			t.Errorf("should be untouched: %q -> %q", in, got)
+		}
+	}
+}
+
+func TestDSHGUIParagraphRewritten(t *testing.T) {
+	want := "You are interacting with the user through the DeepSeek Web GUI whose URL is named in the runtime context. " + dshGUIB
+	if got := sanitizeText(dshGUIA + " " + dshGUIB); got != want {
+		t.Errorf("GUI paragraph:\n got %q\nwant %q", got, want)
+	}
+	lower := strings.ToLower(dshGUIA)
+	if got := sanitizeText(lower); strings.Contains(got, "the runtime context names") || strings.Contains(got, "harness") {
+		t.Errorf("case-insensitive GUI rewrite failed: %q", got)
+	}
+}
+
+func TestDSHBrandRewrittenOnlyInProse(t *testing.T) {
+	if got := sanitizeText("Built with DeepSeek\tHarness today"); got != "Built with DeepSeek today" {
+		t.Errorf("brand not reduced: %q", got)
+	}
+	for _, in := range []string{
+		"github.com/deepseek-ai/deepseek-harness/tree/main",
+		"import deepseek_harness as dsh",
+		"/opt/deepseek-harness/app",
+		"a test harness for DeepSeek",
+	} {
+		if got := sanitizeText(in); got != in {
+			t.Errorf("identifier should be untouched: %q -> %q", in, got)
+		}
+	}
+}
+
+func TestOmOIdentityRewritten(t *testing.T) {
+	in := "You are Sisyphus-Junior - Focused executor from OhMyOpenCode, a helper."
+	if got := sanitizeText(in); got != "You are Sisyphus-Junior - Focused executor, a helper." {
+		t.Errorf("OmO not rewritten: %q", got)
+	}
+	for _, in := range []string{"Sisyphus-Junior alone", "from OhMyOpenCode alone"} {
+		if got := sanitizeText(in); got != in {
+			t.Errorf("half should be untouched: %q -> %q", in, got)
+		}
+	}
+}
+
+func TestChannelFingerprintRewriteIdempotent(t *testing.T) {
+	for _, in := range []string{
+		dshGUIA + " " + dshGUIB,
+		"You are an AI agent powered by DeepSeek Harness. Be brief.",
+		"Sisyphus-Junior - Focused executor from OhMyOpenCode",
+	} {
+		once := sanitizeText(in)
+		if twice := sanitizeText(once); twice != once {
+			t.Errorf("not idempotent: %q -> %q -> %q", in, once, twice)
+		}
+	}
+}
+
+func TestChannelFingerprintScrubbedInEveryRole(t *testing.T) {
+	ms := []any{
+		map[string]any{"role": "system", "content": "You are an AI agent powered by DeepSeek Harness."},
+		map[string]any{"role": "user", "content": dshGUIA + " " + dshGUIB},
+		map[string]any{"role": "assistant", "content": "You are a coding agent powered by the deepseek-v4.1-flash model."},
+		map[string]any{"role": "tool", "content": "Sisyphus-Junior - Focused executor from OhMyOpenCode"},
+	}
+	if !sanitizeMessages(ms) {
+		t.Fatal("expected change")
+	}
+	for i, m := range ms {
+		c := m.(map[string]any)["content"].(string)
+		if containsFoldASCII(c, "harness") || strings.Contains(c, "powered by") || strings.Contains(c, "OhMyOpenCode") {
+			t.Errorf("message %d still carries fingerprint: %q", i, c)
+		}
+	}
+}
+
+func TestChannelFingerprintScrubbedInArgumentsReasoningAndMultimodal(t *testing.T) {
+	imgPart := map[string]any{"type": "image", "source": map[string]any{"data": "DeepSeek Harness"}}
+	ms := []any{map[string]any{
+		"role": "assistant",
+		"content": []any{
+			map[string]any{"type": "text", "text": dshGUIA + " " + dshGUIB},
+			imgPart,
+		},
+		"reasoning_content": "You are an AI assistant created by Example.",
+		"reasoning":         "Built with DeepSeek Harness today",
+		"tool_calls": []any{map[string]any{"function": map[string]any{
+			"arguments": `{"prompt":"Sisyphus-Junior - Focused executor from OhMyOpenCode"}`,
+		}}},
+	}}
+	if !sanitizeMessages(ms) {
+		t.Fatal("expected channel fingerprints to be scrubbed")
+	}
+	m := ms[0].(map[string]any)
+	parts := m["content"].([]any)
+	wantText := "You are interacting with the user through the DeepSeek Web GUI whose URL is named in the runtime context. " + dshGUIB
+	if got := parts[0].(map[string]any)["text"]; got != wantText {
+		t.Errorf("multimodal text = %q, want %q", got, wantText)
+	}
+	if got := imgPart["source"].(map[string]any)["data"]; got != "DeepSeek Harness" {
+		t.Errorf("non-text part modified: %q", got)
+	}
+	if got := m["reasoning_content"]; got != sanitizeIdentityReplacement {
+		t.Errorf("reasoning_content = %q", got)
+	}
+	if got := m["reasoning"]; got != "Built with DeepSeek today" {
+		t.Errorf("reasoning = %q", got)
+	}
+	args := m["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"].(string)
+	var decoded map[string]string
+	if err := json.Unmarshal([]byte(args), &decoded); err != nil {
+		t.Fatalf("sanitized arguments are invalid JSON: %v", err)
+	}
+	if got := decoded["prompt"]; got != "Sisyphus-Junior - Focused executor" {
+		t.Errorf("tool arguments prompt = %q", got)
+	}
+}
+
+func TestContainsFoldASCII(t *testing.T) {
+	if !containsFoldASCII("xx DeepSeek HARNESS", "harness") || containsFoldASCII("harnes", "harness") || containsFoldASCII("", "a") {
+		t.Fatal("containsFoldASCII wrong")
+	}
+}
+
 // newTestUpstream 起一个假上游并捕获请求。
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()

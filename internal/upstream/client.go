@@ -43,7 +43,8 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
+	ErrModelBusy                     // 14003 模型容量繁忙 → (账号,模型) 短窗口避让，保留粘性
+	ErrUpstreamBusy                  // 6020/6021 渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + Retry-After
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -71,6 +72,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrModelBusy:
+		return "model_busy"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
 	case ErrAccountFault:
@@ -277,6 +280,28 @@ const softRateTimeLayout = "2006-01-02 15:04:05"
 func IsModelRateLimit(body string) bool {
 	return reModelRateLimit.MatchString(body) ||
 		(hasBusinessCode(body, modelUsageLimitCode) && strings.Contains(body, modelSwitchModelHint))
+}
+
+// IsModelBusy 报告上游是否明确返回 14003 模型容量繁忙。
+// 只认结构化业务码，避免 requestId 等字段中的数字造成误判；6004 仍保持模型限流语义。
+func IsModelBusy(body string) bool { return hasBusinessCode(body, "14003") }
+
+// QueueRetryAfter 解析 6020/6021 响应体 data.retry_after（秒）。
+// 缺失、非正数、非 JSON 或超过 10 分钟的异常值均返回 0，由调用方使用默认短等待。
+func QueueRetryAfter(body string) time.Duration {
+	var env struct {
+		Data struct {
+			RetryAfter float64 `json:"retry_after"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &env) != nil || env.Data.RetryAfter <= 0 {
+		return 0
+	}
+	d := time.Duration(env.Data.RetryAfter * float64(time.Second))
+	if d <= 0 || d > 10*time.Minute {
+		return 0
+	}
+	return d
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -614,13 +639,14 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
-	// 6021「queue.full.title」是**渠道级容量满载**（上游推理集群排队队列打满），
-	// 不是账号问题：同一时刻换任何账号都会撞同一堵墙。必须先于通用 429 兜底，
-	// 否则会按 ErrSoftRate 逐号软冷却——实测 2 秒内即可把整池健康号全部误杀
-	// 冷却（2026-10-15 实案），且换号白撞放大请求量。429 + 结构化 code 为主判据
-	// （与 14018 同口径）；"queue.full" 固定文案单列为外卡——该文案是上游 i18n
-	// key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
-	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+	// 14003 是模型容量繁忙，不是账号级限流：先按结构化业务码分流，避免落入
+	// 通用 429 后给整个账号施加软冷却。6004 的模型限流语义保持不变。
+	if IsModelBusy(body) {
+		return ErrModelBusy
+	}
+	// 6020 queue.waiting / 6021 queue.full 是渠道级容量信号，不是账号问题。
+	// 结构化 code 不受 HTTP 状态限制；queue.full 固定文案保留兼容兜底。
+	if hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021") || isQueueFullBody(lower) {
 		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/

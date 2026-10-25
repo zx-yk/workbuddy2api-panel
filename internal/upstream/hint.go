@@ -113,6 +113,11 @@ func FrameKind(payload string) ErrKind {
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
 	}
+	// 容量业务码位于 error 信封的独立 code 字段，不能只取 error.message 后分类，
+	// 否则流内 14003/6020/6021 会丢失类型并退化成普通客户端错误。
+	if kind := Classify(http.StatusTooManyRequests, payload); kind == ErrModelBusy || kind == ErrUpstreamBusy {
+		return kind
+	}
 	var f struct {
 		Error struct {
 			Message string `json:"message"`

@@ -114,7 +114,7 @@ func (p *Pool) StickyEligibleForModelRealm(uid, model, realm string) bool {
 	if !ok || (realm != "" && e.a.Realm() != realm) {
 		return false
 	}
-	return e.healthyForModel(time.Now(), model)
+	return e.stickyHealthyForModel(time.Now(), model)
 }
 
 // AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号

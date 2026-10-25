@@ -78,11 +78,95 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
+// 以下规则清理三类渠道指纹：自我介绍归属句、DeepSeek Harness 描述、
+// OhMyOpenCode 子代理身份串。大小写不敏感，路径与标识符不做宽泛替换。
+var (
+	// RE2 没有前瞻，句尾由 rewriteIdentitySentences 手工找。
+	sanitizeIdentityStartRe = regexp.MustCompile(`(?i)You are\s+` +
+		`(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?` +
+		`(?:(?:agent|assistant|model|AI|LLM)\b)?[\s,]*` +
+		`(?:powered by|built on|built by|created by|developed by|made by|trained by)\b`)
+	sanitizeDSHGUIRe = regexp.MustCompile(`(?i)(You are interacting with the user through the ` +
+		`DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI) whose URL the runtime context names\.`)
+	// 只认空格与制表符，deepseek-harness、deepseek_harness 这类路径与标识符不动。
+	sanitizeBrandRe = regexp.MustCompile(`(?i)DeepSeek[ \t]+Harness`)
+	sanitizeOmORe   = regexp.MustCompile(`(?i)Sisyphus-Junior - Focused executor from OhMyOpenCode`)
+)
+
+const sanitizeIdentityReplacement = "You are a helpful AI assistant."
+
+var sanitizeIdentityVerbs = []string{
+	"powered by", "built on", "built by", "created by", "developed by", "made by", "trained by",
+}
+
+// containsFoldASCII 不分配内存的大小写不敏感子串判断，needle 须是小写 ASCII。
+func containsFoldASCII(s, needle string) bool {
+	n := len(needle)
+	for i := 0; i+n <= len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c == needle[0] && strings.EqualFold(s[i:i+n], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// rewriteIdentitySentences 整句替换自我介绍，模型名中的点不误作句尾，换行原样保留。
+func rewriteIdentitySentences(text string) string {
+	var b strings.Builder
+	rest := text
+	for {
+		loc := sanitizeIdentityStartRe.FindStringIndex(rest)
+		if loc == nil {
+			b.WriteString(rest)
+			return b.String()
+		}
+		b.WriteString(rest[:loc[0]])
+		tail := rest[loc[1]:]
+		end := len(tail)
+		for i := 0; i < len(tail); i++ {
+			if tail[i] == '\n' {
+				end = i
+				break
+			}
+			if tail[i] == '.' && (i+1 == len(tail) || strings.IndexByte(" \t\r\n", tail[i+1]) >= 0) {
+				end = i + 1
+				break
+			}
+		}
+		b.WriteString(sanitizeIdentityReplacement)
+		rest = tail[end:]
+	}
+}
+
+func hasChannelFingerprint(text string) bool {
+	if containsFoldASCII(text, "harness") && sanitizeBrandRe.MatchString(text) {
+		return true
+	}
+	if containsFoldASCII(text, "ohmyopencode") && sanitizeOmORe.MatchString(text) {
+		return true
+	}
+	for _, v := range sanitizeIdentityVerbs {
+		if containsFoldASCII(text, v) {
+			return sanitizeIdentityStartRe.MatchString(text)
+		}
+	}
+	return false
+}
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
 		return text
 	}
+	text = sanitizeOmORe.ReplaceAllString(text, "Sisyphus-Junior - Focused executor")
+	text = rewriteIdentitySentences(text)
+	// GUI 描述段要认品牌全名，先于品牌缩减。
+	text = sanitizeDSHGUIRe.ReplaceAllString(text, "${1} whose URL is named in the runtime context.")
+	text = sanitizeBrandRe.ReplaceAllString(text, "DeepSeek")
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
@@ -112,7 +196,7 @@ func hasFingerprint(text string) bool {
 			return true
 		}
 	}
-	return sanitizeBareHdrRe.MatchString(text)
+	return sanitizeBareHdrRe.MatchString(text) || hasChannelFingerprint(text)
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。

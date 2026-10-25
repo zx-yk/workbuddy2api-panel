@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -822,11 +823,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	timeoutRotateExtra := h.cfg.TimeoutRotateExtra
 	// stickyOverflow 表示本次只是从满载的绑定号临时溢出；成功后不改绑。
 	stickyOverflow := false
+	// preserveCapacityBinding 表示绑定号曾命中 14003 容量短窗口；本轮即使用
+	// 其他账号临时代理成功，也保留原会话绑定，待短窗口后回到原账号。
+	preserveCapacityBinding := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		stickyOverflow = false
 		// 选号：粘性号优先，临时满载与持久不可用分别处理。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		// 14003 保留的是跨请求绑定，不是让本轮反复打同一个繁忙账号。
+		// 命中过容量错误的粘性号在本轮后续选号中与普通 tried 账号同样排除。
+		if stickyUID != "" && !(preserveCapacityBinding && tried[stickyUID]) {
 			var why pool.StickyPickResult
 			acct, why = h.cfg.Pool.PickStickyForModel(stickyUID, bareModel)
 			switch {
@@ -1057,17 +1063,42 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
-			// 6021「queue.full.title」渠道级容量满载：**不罚号不轮转**，立即透传
+			// 14003 是 (账号,模型) 的暂时性容量窗口：写短冷却后继续换号，
+			// 但绑定号只释放在途租约、不解除会话；临时代理成功也不改绑。
+			if kind == upstream.ErrModelBusy {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+				if stickyUID != "" && acct.UID == stickyUID {
+					preserveCapacityBinding = true
+					releaseHeld()
+				} else {
+					fail(acct.UID)
+				}
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
+			}
+			// 6020/6021 渠道级容量满载：**不罚号不轮转**，立即透传
 			// 上游原文回客户端（503 + upstream_busy）。上游集群排队打满时换任何
 			// 账号都撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号
 			// （2026-10-15 实案），且换号白撞把无效请求放大 MaxRotate 倍。客户端
 			// 按 SDK 退避重试即可；等待窗口过去渠道恢复即成功。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				// 渠道繁忙不是账号失效：只释放本次租约，保留已有会话绑定。
+				releaseHeld()
+				retryAfter := upstream.QueueRetryAfter(string(respBody))
+				if uerr.RetryAfter > 0 {
+					retryAfter = uerr.RetryAfter // 响应头优先于 body
+				}
+				if retryAfter <= 0 {
+					retryAfter = 5 * time.Second
+				}
+				w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
-					msg = "upstream capacity is full (queue.full); retry after a short wait"
+					msg = "upstream capacity is full; retry after a short wait"
 				}
 				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_busy", msg,
 					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), bareModel, reqHasImage, uerr))
@@ -1150,7 +1181,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeInterrupted
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
+				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow && !preserveCapacityBinding {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			default:
@@ -1162,7 +1193,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
+				if sessKey != "" && h.cfg.Session != nil && !stickyOverflow && !preserveCapacityBinding {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			}
@@ -1244,7 +1275,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil && !stickyOverflow {
+		if sessKey != "" && h.cfg.Session != nil && !stickyOverflow && !preserveCapacityBinding {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
@@ -1293,11 +1324,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
 		case upstream.ErrUpstreamBusy:
-			// 6021 queue.full 渠道级容量满载（防御路径：正常已在轮转循环内
+			// 6020/6021 渠道级容量满载（防御路径：正常已在轮转循环内
 			// fail-fast 拦截）。503 + 可重试语义——上游原文（下方统一透传）
 			// 含 requestId，客户端按 SDK 退避重试即可。
 			code = "upstream_busy"
-			msg = "upstream capacity is full (queue.full); retry after a short wait"
+			msg = "upstream capacity is full; retry after a short wait"
+		case upstream.ErrModelBusy:
+			// 14003 是暂时性容量窗口。若全池仅剩该模型的容量冷却，下方
+			// modelBlock 分支补充最早恢复时间；混合其他模型冷却时仍按保守的
+			// model_unavailable 处理，不把确定性不可用误报成短暂繁忙。
+			code = "model_busy"
+			msg = "model capacity is temporarily busy; retry after a short wait"
 		case upstream.ErrModelBlocked:
 			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
 			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
@@ -1321,20 +1358,57 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
-		code = "model_unavailable"
-		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
-		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
-		if !upstreamMsgPassed {
-			msg = "model is unavailable on every account (per-model cooldown), try another model"
+		if modelBlock.Capacity {
+			// 全池只剩 14003 容量短窗口：这是可重试的 503，不是模型永久不可用。
+			status = http.StatusServiceUnavailable
+			code = "model_busy"
+			if !upstreamMsgPassed {
+				msg = "model capacity is temporarily busy on every account; retry after a short wait"
+			}
+			hint = fmt.Sprintf("model_capacity_busy: %d account(s) in a short capacity window", modelBlock.Count)
+		} else {
+			code = "model_unavailable"
+			// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
+			// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
+			if !upstreamMsgPassed {
+				msg = "model is unavailable on every account (per-model cooldown), try another model"
+			}
+			hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
+			status = http.StatusBadRequest
 		}
-		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
 			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
 		}
 		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
 			hint += "; upstream: " + s
 		}
-		status = http.StatusBadRequest
+	}
+	// 容量错误统一携带整数秒 Retry-After；普通/混合模型阻塞不保留该头，
+	// 避免 400 model_unavailable 却暗示客户端短时间重试。
+	switch code {
+	case "model_busy":
+		retryAfter := 10 * time.Second
+		if modelBlock.Capacity && !modelBlock.Until.IsZero() {
+			retryAfter = time.Until(modelBlock.Until)
+		}
+		if ue != nil && ue.Kind == upstream.ErrModelBusy && ue.RetryAfter > 0 {
+			retryAfter = ue.RetryAfter // 合法响应头优先于本地短窗口
+		}
+		w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
+	case "upstream_busy":
+		var retryAfter time.Duration
+		if ue != nil {
+			retryAfter = upstream.QueueRetryAfter(ue.Msg)
+			if ue.RetryAfter > 0 {
+				retryAfter = ue.RetryAfter
+			}
+		}
+		if retryAfter <= 0 {
+			retryAfter = 5 * time.Second
+		}
+		w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
+	default:
+		w.Header().Del("Retry-After")
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
@@ -1434,6 +1508,12 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 	if err == nil {
 		return false
 	}
+	// 建连失败与响应停滞是两类故障。DNS、dial 和 TLS 握手错误即使实现了
+	// net.Error.Timeout() 或包裹 deadline，也只能走普通传输错误路径，不能消耗
+	// TimeoutRotateExtra，更不能被记成 upstream_timeout。
+	if isConnectError(err) {
+		return false
+	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
@@ -1442,6 +1522,35 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 		return true
 	}
 	return !clientGone && errors.Is(err, context.Canceled)
+}
+
+// isConnectError 识别 DNS/dial/TLS 建连失败。必须先于通用 net.Error 与
+// deadline 判定调用：这些错误的 Timeout() 只说明建连阶段到时，不代表上游已
+// 接受请求后停滞。TLSHandshakeTimeout 在标准库中没有独立导出错误类型，使用其
+// 固定错误文案识别；普通 ResponseHeaderTimeout 不包含该文案，仍按上游超时处理。
+func isConnectError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && strings.EqualFold(opErr.Op, "dial") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "tls handshake timeout")
+}
+
+// retryAfterHeader 把等待时长编码为 Retry-After 整数秒：亚秒向上取整，正等待
+// 最少返回 1，避免客户端把 500ms 理解成立即重试。
+func retryAfterHeader(d time.Duration) string {
+	seconds := d / time.Second
+	if d%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return strconv.FormatInt(int64(seconds), 10)
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
@@ -1568,10 +1677,18 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 已 fail-fast 400 透传原文、终止轮转——「换号可能有不同模型权限」属 11102
 		// （ErrModelBlocked）的分类域，与本类无关。
 	case upstream.ErrUpstreamBusy:
-		// 6021「queue.full.title」渠道级容量满载：账号余额健康、未限流、session 未死，
+		// 6020/6021 渠道级容量满载：账号余额健康、未限流、session 未死，
 		// 换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError/不喂连败，同
 		// ErrContentBlocked 待遇）；chatCompletions 已 fail-fast 503 透传原文、
 		// 终止轮转——该分支只为文档完备。
+	case upstream.ErrModelBusy:
+		// 14003 只避让当前 (账号,模型) 的短容量窗口，不做账号级软冷却、
+		// 不喂熔断或连败。已有粘性由调用方保留；新会话由普通选号严格避开。
+		var retryAfter time.Duration
+		if uerr != nil {
+			retryAfter = uerr.RetryAfter
+		}
+		h.cfg.Pool.CooldownModelBusy(uid, model, retryAfter, "14003 model capacity busy")
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」/11158「该账号类型无此模型权限」：
 		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），

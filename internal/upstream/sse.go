@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -497,6 +499,16 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	pingEvery    time.Duration
+}
+
+// defaultStreamPingInterval 上游静默多久发一次保活注释帧。
+// SSE 注释帧不影响 data 事件语义，20 秒默认间隔可避免代理因连接空闲而断流。
+const defaultStreamPingInterval = 20 * time.Second
+
+// WithPingInterval 覆盖静默保活间隔（<=0 使用默认 20 秒）。
+func WithPingInterval(d time.Duration) StreamOption {
+	return func(o *streamOptions) { o.pingEvery = d }
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -537,6 +549,60 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
 
+	// 所有响应体写入共用一把锁：保活 goroutine 与主循环不得并发写 ResponseWriter。
+	var (
+		writeMu   sync.Mutex
+		lastWrite atomic.Int64
+	)
+	lastWrite.Store(time.Now().UnixNano())
+	writeOut := func(s string) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if _, werr := io.WriteString(w, s); werr != nil {
+			return werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		lastWrite.Store(time.Now().UnixNano())
+		return nil
+	}
+	pingEvery := o.pingEvery
+	if pingEvery <= 0 {
+		pingEvery = defaultStreamPingInterval
+	}
+	stopPing := make(chan struct{})
+	var pingWG sync.WaitGroup
+	pingWG.Add(1)
+	go func() {
+		defer pingWG.Done()
+		// 每半个间隔检查一次，使保活最迟在空闲达到 1.5 个间隔时发出。
+		checkEvery := pingEvery / 2
+		if checkEvery <= 0 {
+			checkEvery = time.Nanosecond
+		}
+		t := time.NewTicker(checkEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopPing:
+				return
+			case <-t.C:
+				if time.Since(time.Unix(0, lastWrite.Load())) < pingEvery {
+					continue
+				}
+				if err := writeOut(": ping\n\n"); err != nil {
+					// 客户端已走：主循环下一次写会拿到同一个错误，这里直接退出。
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stopPing)
+		pingWG.Wait()
+	}()
+
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
 	toolCallSeen := map[int]bool{}
@@ -558,13 +624,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	// writeSSE 原样写出一帧并 flush。
 	writeSSE := func(payload string) error {
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
-			return werr
-		}
-		if fl != nil {
-			fl.Flush()
-		}
-		return nil
+		return writeOut("data: " + payload + "\n\n")
 	}
 
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）。上游 error 帧（error-passthrough）
@@ -737,12 +797,13 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
-			if _, werr := io.WriteString(w, line); werr != nil {
-				return werr
+			// 注释帧原样透传并补足帧尾空行；下游 Messages/Responses 包装层
+			// 按空行分帧，缺少第二个换行会把注释与后续 data 错拼成一帧。
+			if strings.HasPrefix(trimmed, ":") {
+				line += "\n"
 			}
-			if fl != nil {
-				fl.Flush()
+			if werr := writeOut(line); werr != nil {
+				return werr
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
@@ -787,11 +848,8 @@ readLoop:
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+	if err := writeOut("data: [DONE]\n\n"); err != nil {
 		return err
-	}
-	if fl != nil {
-		fl.Flush()
 	}
 	if validFrames == 0 {
 		return errEmptyStream

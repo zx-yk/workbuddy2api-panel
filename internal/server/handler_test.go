@@ -230,6 +230,158 @@ func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
+func TestChatQueueBusyRetryAfterAndSticky(t *testing.T) {
+	cases := []struct {
+		name   string
+		header http.Header
+		body   string
+		want   string
+	}{
+		{"响应头优先于响应体", http.Header{"Retry-After": {"2"}}, `{"code":6020,"data":{"retry_after":7}}`, "2"},
+		{"响应体秒数向上取整", nil, `{"code":6021,"data":{"retry_after":2.25}}`, "3"},
+		{"缺省五秒", nil, `{"code":6020,"msg":"queue.waiting"}`, "5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			up := &upstream.Client{
+				HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					calls++
+					header := http.Header{"Content-Type": {"application/json"}}
+					for key, values := range tc.header {
+						header[key] = values
+					}
+					return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header,
+						Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+				})},
+				ChatBaseCN: "https://fake.example", BillingBaseCN: "https://fake.example",
+			}
+			p := testPoolWith(&auth.Auth{UID: "busy", AccessToken: "at-busy", ExpiresAt: 9999999999})
+			store := newBindStore()
+			sess := session.New(session.Config{TTL: time.Minute, Store: store,
+				Available: func() []string { return []string{"busy"} }})
+			sess.Bind("conv-queue", "busy")
+			h := NewHandler(Config{Pool: p, Upstream: up, Session: sess})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+				strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-queue"}}`)))
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != tc.want {
+				t.Fatalf("code=%d Retry-After=%q want %q body=%s", rec.Code, rec.Header().Get("Retry-After"), tc.want, rec.Body)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d want fail-fast after one attempt", calls)
+			}
+			if uid, ok := store.lastUID("conv-queue"); !ok || uid != "busy" {
+				t.Fatalf("channel capacity must preserve sticky binding: uid=%q ok=%v", uid, ok)
+			}
+			st, _ := p.Status("busy")
+			if st.Cooling || st.InFlight != 0 || st.ConsecutiveFails != 0 || st.BreakerFails != 0 {
+				t.Fatalf("channel capacity must not penalize or retain lease: %+v", st)
+			}
+		})
+	}
+}
+
+func TestChatModelBusyKeepsStickyAcrossTemporaryProxy(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			calls := map[string]int{}
+			up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+				calls[authz]++
+				if authz == "Bearer at-bad" {
+					return http.StatusTooManyRequests, `{"code":14003,"msg":"model capacity busy"}`, false
+				}
+				return http.StatusOK, sseOK, true
+			})
+			p := testPoolWith(
+				&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+				&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+			)
+			p.SetCredits("bad", 2000, 0)
+			store := newBindStore()
+			sess := session.New(session.Config{TTL: time.Minute, Store: store,
+				Available: func() []string { return []string{"bad", "good"} }})
+			sess.Bind("conv-capacity", "bad")
+			h := NewHandler(Config{Pool: p, Upstream: up, Session: sess})
+			body := fmt.Sprintf(`{"model":"glm-5.2","stream":%t,"messages":[],"metadata":{"conversation_id":"conv-capacity"}}`, stream)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+			}
+			if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
+				t.Fatalf("calls=%v want one 14003 attempt then one temporary proxy", calls)
+			}
+			if uid, ok := store.lastUID("conv-capacity"); !ok || uid != "bad" {
+				t.Fatalf("temporary proxy must not steal sticky binding: uid=%q ok=%v", uid, ok)
+			}
+			bad, _ := p.Status("bad")
+			good, _ := p.Status("good")
+			if bad.Cooling || bad.Disabled || bad.InFlight != 0 || bad.ConsecutiveFails != 0 || bad.BreakerFails != 0 || bad.SuccessCount != 0 {
+				t.Fatalf("14003 must be model-only capacity without account penalty: %+v", bad)
+			}
+			if good.SuccessCount != 1 || good.InFlight != 0 {
+				t.Fatalf("temporary proxy success accounting incorrect: %+v", good)
+			}
+		})
+	}
+}
+
+func TestChatModelBusyAllCapacityReturnsRetryable503(t *testing.T) {
+	calls := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: http.StatusTooManyRequests,
+				Header: http.Header{"Content-Type": {"application/json"}, "Retry-After-Ms": {"1500"}},
+				Body:   io.NopCloser(strings.NewReader(`{"code":14003,"msg":"model capacity busy"}`))}, nil
+		})},
+		ChatBaseCN: "https://fake.example", BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "busy", AccessToken: "at-busy", ExpiresAt: 9999999999})
+	store := newBindStore()
+	sess := session.New(session.Config{TTL: time.Minute, Store: store,
+		Available: func() []string { return []string{"busy"} }})
+	sess.Bind("conv-capacity-terminal", "busy")
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-capacity-terminal"}}`)))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "2" {
+		t.Fatalf("code=%d Retry-After=%q body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "model_busy") || strings.Contains(rec.Body.String(), "model_unavailable") {
+		t.Fatalf("pure capacity must be model_busy, not model_unavailable: %s", rec.Body)
+	}
+	if calls != 1 {
+		t.Fatalf("single busy account must not be retried repeatedly in one request: calls=%d", calls)
+	}
+	if uid, ok := store.lastUID("conv-capacity-terminal"); !ok || uid != "busy" {
+		t.Fatalf("terminal capacity response must preserve binding: uid=%q ok=%v", uid, ok)
+	}
+}
+
+func TestChatMixedModelCooldownRemainsUnavailable(t *testing.T) {
+	p := testPoolWith(
+		&auth.Auth{UID: "capacity", AccessToken: "at-capacity", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "limited", AccessToken: "at-limited", ExpiresAt: 9999999999},
+	)
+	p.CooldownModelBusy("capacity", "glm-5.2", 0, "14003")
+	p.CooldownSoftForModel("limited", time.Minute, time.Now().Add(time.Hour), "glm-5.2", "6004")
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		t.Fatal("fully model-cooled pool must not call upstream")
+		return 0, "", false
+	})})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "model_unavailable") {
+		t.Fatalf("mixed cooldown must retain conservative 400 model_unavailable: code=%d body=%s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("non-retryable mixed model block must not carry Retry-After: %q", got)
+	}
+}
+
 // TestChatBadParams400CarriesUpstreamBody 11101 的 400 响应必须包含上游原始
 // 11101 信息（含 requestId，客户端据此排查），且不再出现空洞的 no_healthy_account。
 func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {
@@ -1036,6 +1188,13 @@ func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
+	// 动态目录缓存是包级状态；随机顺序执行时不能继承其他用例的失败退避。
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()

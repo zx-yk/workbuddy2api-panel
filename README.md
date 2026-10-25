@@ -37,12 +37,22 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.4-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.5-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.5 · 2026-10-25
+
+本次为稳定性修复版本，不改变配置与 API 使用方式：
+
+- **容量繁忙与账号故障分流**：`14003` 只冷却对应账号与模型，默认 10 秒起、封顶 1 分钟；已有会话保留原绑定，临时代理成功不改绑，本轮不重复调用刚繁忙的绑定账号。全池仅为容量冷却时返回 `503 model_busy` 与 `Retry-After`；`6020` / `6021` 不罚号、不轮转，返回 `503 upstream_busy`，等待时间依次采用合法响应头、响应体 `retry_after` 和默认值。
+- **清理上行自证标识**：定时活跃、领养、夜猫子、桌面专家对话、校园事件和灵感案例六处会话或请求 ID 改为官方形态，不再发送 `wb2api-*` 前缀。
+- **兼容毫秒凭证到期时间**：导入嵌套或扁平 JSON 凭证时识别毫秒级 `expiresAt` 并归一化为秒，保存与状态往返不重复缩放。
+- **流式保活与建连错误分流**：上游静默 20 秒后发送 SSE 注释保活，Chat Completions、Messages 和 Responses 三种流式协议均生效；保活与正文串行写入。DNS、dial、连接拒绝和 TLS 握手超时不再误判为已建连后的上游停滞超时，保留原有超时加转语义。
+- **补充渠道身份清洗**：覆盖带归属动词的自我介绍句、DeepSeek Harness GUI 描述句和 OhMyOpenCode 完整身份串；仅改写明确的身份文本，保留路径、包名和标识符。
 
 ### v1.14.4 · 2026-10-25
 
@@ -320,7 +330,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.4` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.5` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -332,17 +342,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.4-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.4-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.4-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.4-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.4-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.5-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.5-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.5-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.5-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.5-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.4
+V=1.14.5
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

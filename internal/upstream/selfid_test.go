@@ -23,3 +23,24 @@ func TestGeneratedOutboundIDsHaveNoSelfIdentifyingPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskOutboundIDsHaveNoSelfIdentifyingPrefix(t *testing.T) {
+	tests := map[string][]string{
+		"../scheduler/scheduler.go": {`"wb2api-%d"`},
+		"../scheduler/travel.go":    {`"wb2api-adopt-%d"`},
+		"blackcat.go":               {`"wb2api-night-%d-%d"`},
+		"desktop.go":                {`"wb2api-conv-%d"`},
+		"school.go":                 {`"wb2api-" + clientToken()`, `"wb2api-mp-pb-" + clientToken()`},
+	}
+	for path, forbidden := range tests {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range forbidden {
+			if strings.Contains(string(raw), id) {
+				t.Errorf("%s contains self-identifying ID expression %s", path, id)
+			}
+		}
+	}
+}
