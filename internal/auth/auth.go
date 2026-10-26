@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
 )
 
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
@@ -348,11 +348,10 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := safefile.WriteAtomic(a.FilePath, raw, 0o600); err != nil {
 		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
 		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
-		msg := fmt.Sprintf("写入 %s 失败: %v", tmp, err)
+		msg := fmt.Sprintf("写入 %s 失败: %v", a.FilePath, err)
 		if errors.Is(err, fs.ErrPermission) {
 			msg += "\n（Docker 部署：容器内用户对宿主机挂载目录无写权限。解法任选：" +
 				"1) 以本机 uid 运行容器：PUID=$(id -u) PGID=$(id -g) docker compose up -d；" +
@@ -361,7 +360,7 @@ func (a *Auth) SaveAtomic() error {
 		}
 		return errors.New(msg)
 	}
-	return os.Rename(tmp, a.FilePath)
+	return nil
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。
@@ -378,13 +377,21 @@ func LoadDir(dir string) ([]*Auth, error) {
 	seenUID := make(map[string]string, len(files))
 	var out []*Auth
 	for _, f := range files {
-		raw, err := os.ReadFile(f)
+		// 掉电/写入中断可能留下空或半截文件：主文件不可用时回退同目录的 .bak
+		// （写入侧 safefile.WriteAtomic 每次都会留一份），避免账号"凭空少一个"。
+		raw, usedBak, err := safefile.ReadWithBackup(f, func(b []byte) error {
+			_, perr := Parse(b)
+			return perr
+		})
 		if err != nil {
 			continue
 		}
 		a, err := Parse(raw)
 		if err != nil {
 			continue
+		}
+		if usedBak {
+			log.Printf("WARN: auth %s 不可用，已回退备份 %s.bak", f, f)
 		}
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {

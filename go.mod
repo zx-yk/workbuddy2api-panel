@@ -1,6 +1,6 @@
 module github.com/linguo2625469/workbuddy2api-panel
 
-go 1.22.5
+go 1.23
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

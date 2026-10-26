@@ -55,6 +55,15 @@ type Config struct {
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
 
+	// BalanceRefreshJitterPermill / TaskSweepJitterPermill 分钟级周期任务的间隔抖动幅度
+	// （千分数，0–500，缺省 0 = 不抖动，行为与接入前逐字一致）。让每轮间隔在
+	// ±(值/1000)×基准 内随机偏移，不再精确整点打卡。
+	BalanceRefreshJitterPermill int
+	TaskSweepJitterPermill      int
+	// NightAccountCap 夜猫子参与上限（缺省 0 = 不限）。>0 时只让积分最高的前 N 个
+	// 账号在夜间发真实对话，其余账号夜里静默；白天任务仍全池保号。
+	NightAccountCap int
+
 	// IncludeDisabledInTasks 让「保号类」四任务（签到 / 活跃上报 / token 保活 / 余额刷新）
 	// 对已禁用（disabled）的账号也执行（schedule.include_disabled_in_tasks）。
 	// 缺省 false = 保持「禁用的跳过」既有语义；打开后禁用号照常签到保号，但**仍不参与
@@ -98,6 +107,10 @@ type Scheduler struct {
 	// sweepInterval 任务补领清扫间隔（纳秒，0=暂停）。语义同 balanceInterval：
 	// SetTaskSweepInterval 可热改（面板保存配置后下一轮生效）。
 	sweepInterval atomic.Int64
+	// 人味化参数（原子读：面板保存配置后热生效，下一轮间隔/下一轮夜猫子生效）。
+	balanceJitter atomic.Int32
+	sweepJitter   atomic.Int32
+	nightCap      atomic.Int32
 
 	// lastBalanceRefresh 最近一次后台余额刷新的完成时刻（Unix 纳秒，0=尚未跑过）。
 	// 供面板「到期提醒」标注数据年龄：卡片展示的是这份快照，必须让年龄可读，
@@ -132,7 +145,7 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
-	return &Scheduler{
+	sch := &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
 		balanceState:  make(map[string]balanceFailState),
@@ -140,6 +153,35 @@ func New(cfg Config) *Scheduler {
 		rearmBalance:  make(chan struct{}, 1),
 		rearmSweep:    make(chan struct{}, 1),
 	}
+	sch.SetJitter(cfg.BalanceRefreshJitterPermill, cfg.TaskSweepJitterPermill)
+	sch.SetNightAccountCap(cfg.NightAccountCap)
+	return sch
+}
+
+// SetJitter 热更新周期任务的间隔抖动幅度（千分数，0–500；0 = 关闭）。
+// 越界钳到 [0,500]：下限 0 是"不抖动"，上限之外会漂移成不可预期的节奏。
+func (s *Scheduler) SetJitter(balancePermill, sweepPermill int) {
+	s.balanceJitter.Store(int32(clampPermill(balancePermill)))
+	s.sweepJitter.Store(int32(clampPermill(sweepPermill)))
+}
+
+// SetNightAccountCap 热更新夜猫子参与上限（0 = 不限）。
+func (s *Scheduler) SetNightAccountCap(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.nightCap.Store(int32(n))
+}
+
+// clampPermill 把抖动幅度钳到合法区间。
+func clampPermill(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > jitterPermillMax {
+		return jitterPermillMax
+	}
+	return v
 }
 
 // ExpiringSoonWindow 返回当前快过期路由窗口（读取时与热配置写在 schedMu 下同步）。
@@ -861,7 +903,8 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 					continue
 				}
 			}
-			timer := time.NewTimer(cur)
+			// 间隔抖动：缺省 0 时 jitteredInterval 原样返回 cur（老行为逐字不变）。
+			timer := time.NewTimer(jitteredInterval(cur, int(s.balanceJitter.Load()), scheduleRand))
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -904,7 +947,7 @@ func (s *Scheduler) StartTaskSweep(ctx context.Context, interval time.Duration) 
 					continue
 				}
 			}
-			timer := time.NewTimer(cur)
+			timer := time.NewTimer(jitteredInterval(cur, int(s.sweepJitter.Load()), scheduleRand))
 			select {
 			case <-ctx.Done():
 				timer.Stop()

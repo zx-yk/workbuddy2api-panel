@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
 )
 
 var flushInterval = 5 * time.Second
@@ -119,13 +119,19 @@ func (p *Pool) Flush() {
 
 // Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
 func (p *Pool) load() {
-	raw, err := os.ReadFile(p.stateFp)
+	// 掉电安全：主文件缺失/为空/非法 JSON 时回退 .bak。零长度文件是最常见的
+	// 损坏形态（rename 日志先提交、数据块后刷盘），把它当合法状态就会把真实的
+	// 冷却/成本/用量状态抹掉。
+	raw, usedBak, err := safefile.ReadWithBackup(p.stateFp, safefile.JSONValidator())
 	if err != nil {
 		return
 	}
 	var sf stateFile
 	if json.Unmarshal(raw, &sf) != nil {
 		return
+	}
+	if usedBak {
+		log.Printf("WARN: pool: state.json 不可用，已回退备份 state.json.bak")
 	}
 	p.applyAccountsLocked(sf.Accounts)
 	p.restoreSchedulingLocked(sf.Scheduling)
@@ -261,15 +267,9 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
+	// 落盘走 safefile：tmp 写入后 fsync、旧文件转 .bak、rename 后再 fsync 目录。
+	// 只做 tmp+rename 时，掉电可能留下长度正确但内容全 0 的 state.json。
+	if err := safefile.WriteAtomic(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
 		return
 	}

@@ -628,6 +628,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 模型级挂死熔断：该 (域, 模型) 近期连续停滞且仍在熔断窗口内 → 入口直接失败快返，
+	// 不再逐号白等一整个超时。带 Retry-After，客户端等待后重试即可。
+	if until, blocked := h.cfg.Pool.ModelHangBlocked(realm, bareModel); blocked {
+		wait := time.Until(until)
+		if wait < time.Second {
+			wait = time.Second
+		}
+		// 不在这里累计观测：熔断期内被拒的请求不是新的停滞证据，累计会把窗口
+		// 无限续期，熔断就永远不会关闭。
+		w.Header().Set("Retry-After", retryAfterHeader(wait))
+		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "model_temporarily_down",
+			"model is temporarily unresponsive upstream, retry after the indicated delay", "")
+		st.status = http.StatusServiceUnavailable
+		st.outcome = reqlog.OutcomeHTTPError
+		log.Printf("WARN: [server] model hang circuit open model=%s realm=%s: reject request until %s",
+			bareModel, realm, until.Format(time.RFC3339))
+		return
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
@@ -947,6 +966,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// **客户端仍在但 ctx 被取消**——那只能是我们自己的空闲看门狗掐的流，
 			// 也就是上游停滞。客户端主动断连时 r.Context() 已取消，走下面的抖动分支。
 			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
+				// 模型级挂死观测：同一 (域, 模型) 在观察窗内连续停滞说明问题不在账号，
+				// 逐号轮转只会把一整份超时成本乘以账号数。达到阈值后入口直接失败快返。
+				h.cfg.Pool.NoteModelHang(realm, bareModel)
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
@@ -1217,6 +1239,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				st.outcome = reqlog.OutcomeSuccess
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				// 成功是最强的"没挂"证据：清零该模型的停滞观测与熔断。
+				h.cfg.Pool.ClearModelHang(realm, bareModel)
 				// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -1321,6 +1345,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		h.cfg.Pool.ClearModelHang(realm, bareModel)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		if sessKey != "" && h.cfg.Session != nil && !stickyOverflow && !preserveCapacityBinding {
 			h.cfg.Session.Bind(sessKey, acct.UID)
@@ -1413,6 +1438,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "model capacity is temporarily busy on every account; retry after a short wait"
 			}
 			hint = fmt.Sprintf("model_capacity_busy: %d account(s) in a short capacity window", modelBlock.Count)
+		} else if modelBlock.QuotaOnly {
+			// 全池清一色是 6004/6000 用量配额：这是限流，不是"模型不存在"，按 429 返回。
+			// 不设 Retry-After：配额锁要等到上游重置墙钟才解除，客户端把该头当"睡多久"
+			// 的指令时会把整段冷却变成静默挂起。重置时刻放在 gateway_hint 里给人看。
+			status = http.StatusTooManyRequests
+			code = "model_quota_exhausted"
+			if !upstreamMsgPassed {
+				msg = "model quota exhausted on every account; wait for the upstream reset before retrying"
+			}
+			hint = fmt.Sprintf("model_quota: %d account(s) hit the upstream quota for this model", modelBlock.Count)
 		} else {
 			code = "model_unavailable"
 			// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
@@ -1433,6 +1468,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 容量错误统一携带整数秒 Retry-After；普通/混合模型阻塞不保留该头，
 	// 避免 400 model_unavailable 却暗示客户端短时间重试。
 	switch code {
+	case "model_quota_exhausted":
+		// 显式不设 Retry-After（见上）；防御性删掉可能由更早分支留下的头。
+		w.Header().Del("Retry-After")
 	case "model_busy":
 		retryAfter := 10 * time.Second
 		if modelBlock.Capacity && !modelBlock.Until.IsZero() {

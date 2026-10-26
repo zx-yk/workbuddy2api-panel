@@ -37,6 +37,12 @@ type Pool struct {
 	exploreLast map[string]time.Time
 	// costExploreEvents 累计探索事件数（/status 透出；pick 写锁内 ++，无需 atomic）。
 	costExploreEvents int64
+	// hangSeen / hangUntil 模型级挂死熔断（见 hang.go）：按 (域, 模型) 记录观察窗内的
+	// 停滞时刻与熔断截止。运行态（不持久化）：重启后重新累计，5 分钟窗口无恢复必要。
+	hangSeen  map[string][]time.Time
+	hangUntil map[string]time.Time
+	// hangTotal 进程内触发的熔断次数（观测用）。
+	hangTotal atomic.Int64
 	// degradeThreshold / degradeCooldown / degradeCooldownMax 连败降权参数
 	// （SetDegrade 注入；默认值见 defaultDegrade*，issue #114）。
 	degradeThreshold   int

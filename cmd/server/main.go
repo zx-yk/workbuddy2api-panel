@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 透出到 /panel/api/overview。
-const appVersion = "1.14.6-panel"
+const appVersion = "1.14.7-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -208,6 +208,10 @@ func main() {
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
+		// 人味化：周期任务间隔抖动（千分数，0 = 精确固定间隔）与夜猫子参与上限。
+		BalanceRefreshJitterPermill: cfg.Schedule.BalanceRefreshJitterPermill,
+		TaskSweepJitterPermill:      cfg.Schedule.TaskSweepJitterPermill,
+		NightAccountCap:             cfg.Schedule.NightAccountCap,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -387,13 +391,24 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 关停窗口可配（缺省 30s）：在途 SSE 的合法时长可达分钟级，旧的固定 5s
+		// 必然把在途流掐成连接重置。超时不再静默——被放弃的在途请求要能从日志看出来。
+		window := cfg.ServerShutdownTimeoutDur
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), window)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// 0 窗口是显式「立即退出」，不算异常；其余超时要留 WARN。
+			if window > 0 {
+				log.Printf("WARN: shutdown window %s elapsed, in-flight requests abandoned: %v", window, err)
+			}
+		}
 	}()
 
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// log.Fatalf 走 os.Exit，defer 不会执行：先把池状态落盘再退出，
+		// 否则监听失败这类启动期故障会连带丢掉整轮冷却/成本/用量状态。
+		p.Flush()
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
@@ -554,6 +569,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	sch.SetJitter(newCfg.Schedule.BalanceRefreshJitterPermill, newCfg.Schedule.TaskSweepJitterPermill)
+	sch.SetNightAccountCap(newCfg.Schedule.NightAccountCap)
 
 	return restartRequiredFields(newCfg), nil
 }

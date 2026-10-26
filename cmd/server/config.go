@@ -57,6 +57,10 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// ShutdownTimeout 收到退出信号后等待在途请求结束的窗口（缺省 "30s"）。
+		// 在途 SSE 的合法时长可达分钟级，旧的固定 5s 必然把在途流掐成连接重置；
+		// "0" = 立即退出（不等在途），负值 fail fast。改动需重启进程。
+		ShutdownTimeout string `json:"shutdown_timeout,omitempty"` // "30s"
 	} `json:"server"`
 
 	Cooldown struct {
@@ -94,7 +98,15 @@ type Config struct {
 		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
-		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务自动排程
+		// BalanceRefreshJitterPermill / TaskSweepJitterPermill 分钟级周期任务的间隔
+		// 抖动幅度（千分数，0–500，缺省 0 = 精确固定间隔）。让每轮不再整点对齐，
+		// 避免同一出口 IP 上全部账号按机器节拍活动。
+		BalanceRefreshJitterPermill int `json:"balance_refresh_jitter_permill"`
+		TaskSweepJitterPermill      int `json:"task_sweep_jitter_permill"`
+		// NightAccountCap 夜猫子参与上限（0 = 不限）。>0 时夜间真实对话只让积分最高
+		// 的前 N 个账号做，其余夜间静默；白天任务仍全池保号。
+		NightAccountCap int  `json:"night_account_cap"`
+		GrowthEnabled   bool `json:"growth_enabled"` // 缺省 true；false = 关成长任务自动排程
 
 		// IncludeDisabledInTasks 让「保号类」定时任务（签到 / 活跃上报 / token 保活 /
 		// 余额刷新）对**已禁用（disabled）**的账号也执行。
@@ -272,6 +284,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ServerShutdownTimeoutDur 解析后的优雅关停窗口；0 = 立即退出。
+	ServerShutdownTimeoutDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -286,6 +300,7 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.ShutdownTimeout = "30s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
@@ -511,6 +526,22 @@ func (c *Config) normalize() error {
 	if c.Pool.Strategy, err = c.Pool.Strategy.Normalize(); err != nil {
 		return fmt.Errorf("pool.strategy: %w", err)
 	}
+	// 人味化参数：抖动幅度 0–500（千分数），越界报错而不是静默钳——静默钳会让人
+	// 以为配置生效了。夜猫子上限 <0 无语义，同样报错。
+	for _, kv := range []struct {
+		name string
+		v    int
+	}{
+		{"schedule.balance_refresh_jitter_permill", c.Schedule.BalanceRefreshJitterPermill},
+		{"schedule.task_sweep_jitter_permill", c.Schedule.TaskSweepJitterPermill},
+	} {
+		if kv.v < 0 || kv.v > 500 {
+			return fmt.Errorf("%s: %d 超出 0–500", kv.name, kv.v)
+		}
+	}
+	if c.Schedule.NightAccountCap < 0 {
+		return fmt.Errorf("schedule.night_account_cap: %d 不能为负", c.Schedule.NightAccountCap)
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
@@ -530,6 +561,17 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
+	}
+	// 优雅关停窗口：空值回落 30s；"0" = 立即退出；负值 fail fast。
+	// 旧实现硬编码 5s，在途 SSE 合法时长可达分钟级，必然被掐成连接重置。
+	if c.Server.ShutdownTimeout == "" {
+		c.Server.ShutdownTimeout = "30s"
+	}
+	if c.ServerShutdownTimeoutDur, err = time.ParseDuration(c.Server.ShutdownTimeout); err != nil {
+		return fmt.Errorf("server.shutdown_timeout: %w", err)
+	}
+	if c.ServerShutdownTimeoutDur < 0 {
+		return fmt.Errorf("server.shutdown_timeout: 负时长 %q 无意义", c.Server.ShutdownTimeout)
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)

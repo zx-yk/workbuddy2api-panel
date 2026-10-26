@@ -422,6 +422,18 @@ type ModelBlockStatus struct {
 	Until    time.Time // 最早解封时间（零值 = 上游未给重置时刻）
 	Count    int       // 因此被挡的账号数
 	Capacity bool      // true = 所有阻塞均为 14003 暂时性容量窗口，可 503 重试
+	// QuotaOnly true = 所有阻塞原因都是用量配额（6004/6000）。配额锁在重置前重试
+	// 必然同样失败，是"限流"语义而不是"参数/模型不可用"，故按 429 返回且**不带**
+	// Retry-After——带上会被某些客户端当成"睡多久"的指令，把 20 分钟锁变成 20 分钟
+	// 静默挂起，比报错更难排查。
+	QuotaOnly bool
+}
+
+// isQuotaReason 报告模型级冷却原因是否属于用量配额（6004/6000 家族）。
+// 原因字符串由 applyErrorPolicy 写入（"6004 model rate limit" / "6000 model rate limit"）。
+func isQuotaReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return strings.HasPrefix(reason, "6004") || strings.HasPrefix(reason, "6000")
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
@@ -453,7 +465,7 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 	defer p.mu.Unlock()
 	now := time.Now()
 
-	st := ModelBlockStatus{Capacity: true}
+	st := ModelBlockStatus{Capacity: true, QuotaOnly: true}
 	for _, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
@@ -471,6 +483,9 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 		if mc, ok := e.modelCooldowns[model]; ok {
 			if !mc.Capacity {
 				st.Capacity = false
+			}
+			if !isQuotaReason(mc.Reason) {
+				st.QuotaOnly = false
 			}
 			if st.Reason == "" {
 				st.Reason = mc.Reason

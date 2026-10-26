@@ -2406,3 +2406,101 @@ func TestStreamEmptyReplyRescue(t *testing.T) {
 		t.Fatalf("救援请求 thinking=%v want disabled", second["thinking"])
 	}
 }
+
+// TestModelHangCircuitRejectsAtEntry 模型级挂死熔断：连续停滞达阈值后，入口直接
+// 503 + Retry-After，不再逐号白等一整个超时（上游调用次数必须为 0）。
+func TestModelHangCircuitRejectsAtEntry(t *testing.T) {
+	var calls int
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(sseOK))}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.NoteModelHang("cn", "glm-5.2")
+	p.NoteModelHang("cn", "glm-5.2") // 第 2 次 → 熔断
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503, body=%s", rec.Code, rec.Body)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Fatal("熔断应带 Retry-After")
+	}
+	if calls != 0 {
+		t.Fatalf("熔断期不应打上游，calls=%d", calls)
+	}
+	if !strings.Contains(rec.Body.String(), "model_temporarily_down") {
+		t.Fatalf("错误码应为 model_temporarily_down: %s", rec.Body)
+	}
+}
+
+// TestModelQuotaLockReturns429 全池清一色 6004 配额锁：429 + 明确 code，
+// 且**不带** Retry-After（带上会让部分客户端把整段冷却当成静默等待）。
+func TestModelQuotaLockReturns429(t *testing.T) {
+	var calls int
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(sseOK))}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.CooldownSoftForModel("u1", time.Hour, time.Now().Add(time.Hour), "glm-5.2", "6004 model rate limit")
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d want 429, body=%s", rec.Code, rec.Body)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra != "" {
+		t.Fatalf("配额锁不得带 Retry-After，got %q", ra)
+	}
+	if !strings.Contains(rec.Body.String(), "model_quota_exhausted") {
+		t.Fatalf("错误码应为 model_quota_exhausted: %s", rec.Body)
+	}
+	if calls != 0 {
+		t.Fatalf("全池锁定时不应打上游，calls=%d", calls)
+	}
+}
+
+// TestModelUnavailableStill400 混合原因（11102 确定性不可用）仍按 400 不可重试处理，
+// 不能被配额分支误报成 429。
+func TestModelUnavailableStill400(t *testing.T) {
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(sseOK))}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.BlockModelBackoff("u1", "glm-5.2", "11102 model not available")
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400, body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "model_unavailable") {
+		t.Fatalf("错误码应为 model_unavailable: %s", rec.Body)
+	}
+}
