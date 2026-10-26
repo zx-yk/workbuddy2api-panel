@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 var flushInterval = 5 * time.Second
@@ -208,15 +209,28 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
 		// （负 per1k / 零 LastSeen——上游异常或旧文件手改产生的脏数据）。
+		//
+		// 另做一次性口径迁移：无 last_per_1k 的条目**不恢复**。这些条目来自
+		// 「用 EMA 判层」的旧口径，其中既有"付过一次费就永久收费"的单向污染，
+		// 也有历史 -sg 兄弟模型扣费记错账留下的不可信值。保留它们会让单号垄断
+		// 在升级后继续存在；丢弃后退回「无观测」层，由下一次真实请求重新学习。
 		if len(s.ModelCosts) > 0 {
+			dropped := 0
 			for m, mc := range s.ModelCosts {
 				if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL || mc.CostPer1k < 0 {
+					continue
+				}
+				if mc.LastPer1k == nil {
+					dropped++
 					continue
 				}
 				if e.modelCost == nil {
 					e.modelCost = map[string]modelCostEntry{}
 				}
-				e.modelCost[m] = modelCostEntry{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				e.modelCost[m] = modelCostEntry{CostPer1k: mc.CostPer1k, LastPer1k: mc.LastPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+			}
+			if dropped > 0 {
+				log.Printf("[pool] cost ledger: dropped %d legacy (no last_per_1k) entries for uid %s; they relearn on next real request", dropped, logfmt.UID8(uid))
 			}
 		}
 		p.byUID[uid] = e
@@ -346,7 +360,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 				if s.ModelCosts == nil {
 					s.ModelCosts = map[string]stateModelCost{}
 				}
-				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastPer1k: mc.LastPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
 			}
 		}
 		sf.Accounts[uid] = s

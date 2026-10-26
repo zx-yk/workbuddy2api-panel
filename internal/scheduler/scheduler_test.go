@@ -340,7 +340,11 @@ func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 	var fails atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fails.Add(1) == 3 { // 第 3 次（本次调度循环的第二轮）刷新成功
-			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+			// 不带 expiresIn：refresh 成功但 AT 仍是过期状态（preserveExpiry 保留旧
+			// ExpiresAt=1）。本用例只验 12153 计数与「成功清计数」，AT 无效才能让
+			// 后面的 12153 继续走计数路径（AT 有效的分支见
+			// TestRunKeepaliveRefreshDeadButAccessTokenValid）。
+			w.Write([]byte(`{"code":0,"data":{"accessToken":"new"}}`))
 			return
 		}
 		w.WriteHeader(401)
@@ -373,6 +377,37 @@ func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 	s.RunKeepaliveNow() // 12153 #3（新计数）→ 禁用
 	if st, _ := p.Status("u1"); !st.Disabled {
 		t.Fatalf("新计数第 3 次 12153 应禁用: %+v", st)
+	}
+}
+
+// TestRunKeepaliveRefreshDeadButAccessTokenValid refresh 恒回 12153 但 AT 仍有效时，
+// 保活不得计入 session dead，更不能在 3 轮后禁用账号（issue #83 的核心场景：
+// RT 失效 ≠ 账号不可用，对话接口此时照常 200）。
+func TestRunKeepaliveRefreshDeadButAccessTokenValid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	// AT 有效期还有一天：refresh 判死但账号可用。
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().Add(24 * time.Hour).Unix()}
+	p.Add(a)
+
+	up := &upstream.Client{
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	// 超过阈值（3 次）多跑几轮：全部应为「不计死」。
+	for i := 0; i < 5; i++ {
+		s.RunKeepaliveNow()
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("AT 仍有效时 refresh 判死不得禁用账号: %+v", st)
 	}
 }
 
@@ -673,7 +708,6 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 		t.Errorf("checkin calls=%d want 2（正常 + 暂停参与；禁用跳过）", got)
 	}
 }
-
 
 // TestPausedStillTravels 暂停号照常跑旅行：旅行是纯 RPC（状态/派出/领奖 +
 // 领养前置上报），不发模型对话，与「让位防风控」不冲突——唯一被跳过的

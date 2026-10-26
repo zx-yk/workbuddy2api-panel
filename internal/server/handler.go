@@ -901,20 +901,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
-				lastErr = err
-				var ue *upstream.Error
-				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+				// RT 失效但 AT 仍然有效：这次请求照发（不罚号、不换号）。把这种号
+				// 判死会禁掉一个完全健康的账号——refresh 归 refresh，可用性看 AT。
+				if upstream.SessionDeadButUsable(acct) {
+					log.Printf("INFO: [server] chat acct=%s: refresh dead but access token still valid — send with current access token",
+						logfmt.Label(acct.UID, acct.Nickname))
 				} else {
-					h.cfg.Pool.NoteError(acct.UID)
+					lastErr = err
+					var ue *upstream.Error
+					if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+						h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					} else {
+						h.cfg.Pool.NoteError(acct.UID)
+					}
+					fail(acct.UID)
+					if !rotateBackoff(i, r.Context()) {
+						break // ctx 取消：终止轮转（refresh 失败换号退避）
+					}
+					continue
 				}
-				fail(acct.UID)
-				if !rotateBackoff(i, r.Context()) {
-					break // ctx 取消：终止轮转（refresh 失败换号退避）
-				}
-				continue
-			}
-			if err := acct.SaveAtomic(); err != nil {
+			} else if err := acct.SaveAtomic(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
 				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
 			}
@@ -1141,10 +1147,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二个参数为 true = 名单为空时启用弱判定——tools 声明在链路上丢失是
 			// 实测最常见的泄漏成因，只做严格判定等于对主场景不设防。
 			repair := upstream.NewMarkupRepair(declaredTools, true)
+			// 空回复救援（思考吃光 max_tokens → finish_reason=length + 正文零字节）：
+			// 同一额度、关闭思考重发一次。不放大客户端要的上限——超发既是语义违约，
+			// 也是新的可判别形态；目标只是把预算从思考手里拿回来。
+			// 救援流不接 stats 统计（首跳整条为空、救援流通常极短，少计的 token 可忽略）。
+			rescue := func() (io.Reader, func(), error) {
+				b2, ok := upstream.DisableThinkingBody(body)
+				if !ok {
+					return nil, nil, nil // 非 deepseek / 解析失败：放弃救援，行为同接线前
+				}
+				rc2, st2, _, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, b2, clientIP, chatMeta)
+				if terr != nil || rc2 == nil || st2 != http.StatusOK {
+					if rc2 != nil {
+						rc2.Close()
+					}
+					if terr != nil {
+						return nil, nil, terr
+					}
+					return nil, nil, nil
+				}
+				log.Printf("INFO: [server] stream acct=%s model=%s: empty reply truncated by thinking budget — retrying with thinking disabled",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				return rc2, func() { rc2.Close() }, nil
+			}
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
-				upstream.WithMarkupRepair(repair))
+				upstream.WithMarkupRepair(repair), upstream.WithEmptyReplyRescue(rescue))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1246,6 +1275,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError
 			return
+		}
+		// 空回复救援（非流式）：finish_reason=length + 正文零字节 + 无 tool_calls
+		// = 思考把整份 max_tokens 吃光。同额度关思考重发一次，只改这一次请求体，
+		// 不改客户端看到的上限；救援失败按原响应返回（行为同接线前）。
+		if upstream.EmptyTruncatedReply(resp) {
+			if b2, ok := upstream.DisableThinkingBody(body); ok {
+				if rc2, st2, _, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, b2, clientIP, chatMeta); terr == nil && st2 == http.StatusOK && rc2 != nil {
+					resp2, err2 := upstream.Aggregate(rc2)
+					rc2.Close()
+					if err2 == nil && len(resp2) > 0 {
+						resp = resp2
+						log.Printf("INFO: [server] non-stream acct=%s model=%s: empty reply truncated by thinking budget — retried with thinking disabled",
+							logfmt.Label(acct.UID, acct.Nickname), bareModel)
+					}
+				} else if rc2 != nil {
+					rc2.Close()
+				}
+			}
 		}
 		// 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls。
 		// 只在「没有结构化 tool_calls」且「finish_reason 为 stop」时生效（见 dsml.go）；

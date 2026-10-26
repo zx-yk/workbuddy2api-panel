@@ -43,6 +43,9 @@ func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 		return false
 	}
 	e.sessionDeadFails++
+	// 计数值本身是持久化状态：不置脏的话，进程在 5s flusher 之前退出会让磁盘残留
+	// 旧计数，重启后一次失败即达阈值误禁账号（"清零点同样落盘"是本文件的承诺）。
+	p.dirty.Store(true)
 	if e.sessionDeadFails < sessionDeadThreshold {
 		return false
 	}
@@ -53,11 +56,15 @@ func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 
 // ClearSessionDead 清连续 12153 计数——账号被证明未死的任何时刻调用：
 // refresh 成功（RunKeepaliveNow）、chat 成功（NoteSuccess）、手工复活（ReviveDisabled）。
+//
+// 清零同样必须落盘（且只在真的非零时置脏，避免每次成功都无谓写盘）：否则重启后
+// 残留的旧计数会让刚被成功 refresh 自证活着的账号下一次失败即被禁用。
 func (p *Pool) ClearSessionDead(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
+	if e, ok := p.byUID[uid]; ok && e.sessionDeadFails != 0 {
 		e.sessionDeadFails = 0
+		p.dirty.Store(true)
 	}
 }
 
@@ -247,16 +254,22 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	}
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
+	last := per1k
 	if !seen {
-		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
+		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastPer1k: &last, LastSeen: time.Now(), Samples: 1}
 	} else {
-		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，
-		// per1k≤0）且本次实测收费（per1k>0）——账号在该模型上的免费窗口结束。
-		if prev.CostPer1k <= 0 && per1k > 0 {
+		// 判层翻转事件（看覆盖前的 tier，不只看 EMA）：免费→收费是限免窗口结束，
+		// 收费→免费是号重新进免费池。两个方向都要留痕——单向日志正是本 bug 长期
+		// 无人察觉的原因（收费层的号再也观测不到免费，日志里永远只有"开始收费"）。
+		prevTier, nextTier := prev.tier(), modelCostEntry{LastPer1k: &last}.tier()
+		if prevTier != nextTier && nextTier == 2 {
 			log.Printf("[pool] model %s on uid %s: free tier ended, now %.3f credits/1k", model, logfmt.UID8(uid), per1k)
+		} else if prevTier != nextTier && nextTier == 0 {
+			log.Printf("[pool] model %s on uid %s: back to free tier, %.3f credits/1k", model, logfmt.UID8(uid), per1k)
 		}
 		e.modelCost[model] = modelCostEntry{
 			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
+			LastPer1k: &last,
 			LastSeen:  time.Now(),
 			Samples:   prev.Samples + 1,
 		}
@@ -694,6 +707,7 @@ func (p *Pool) modelCostsStatusLocked(e *entry, now time.Time) []ModelCostStatus
 		rows = append(rows, ModelCostStatus{
 			Model:     m,
 			CostPer1k: mc.CostPer1k,
+			LastPer1k: mc.LastPer1k,
 			LastSeen:  mc.LastSeen,
 			Samples:   mc.Samples,
 		})

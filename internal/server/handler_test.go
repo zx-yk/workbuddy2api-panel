@@ -2278,3 +2278,131 @@ func TestModelsHiddenFiltered(t *testing.T) {
 		t.Errorf("hidden model leaked into /v1/models: ids=%v", ids)
 	}
 }
+
+// TestNonStreamEmptyReplyRescue 非流式：思考吃光 max_tokens（finish_reason=length、
+// 正文零字节、无 tool_calls）时，同额度关思考重发一次，客户端拿到正常正文。
+//
+// 这是 Agent 循环最怕的形态：回合"正常结束"却一个字都没有，比报错更难排查。
+func TestNonStreamEmptyReplyRescue(t *testing.T) {
+	const emptyTruncated = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	const rescued = "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"来自救援流\"}}]}\n\n" +
+		"data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}\n\n" +
+		"data: [DONE]\n\n"
+
+	var bodies []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(raw))
+			body := emptyTruncated
+			if len(bodies) > 1 {
+				body = rescued
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"deepseek-v4.1-flash",
+		"max_tokens":200,
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("上游调用次数=%d want 2（首跳 + 救援跳）", len(bodies))
+	}
+	if !strings.Contains(rec.Body.String(), "来自救援流") {
+		t.Fatalf("客户端应拿到救援流的正文: %s", rec.Body)
+	}
+	// 救援请求必须关思考，且不放大客户端给的 max_tokens。
+	var second map[string]any
+	if err := json.Unmarshal([]byte(bodies[1]), &second); err != nil {
+		t.Fatalf("救援请求体非法: %v", err)
+	}
+	th, _ := second["thinking"].(map[string]any)
+	if th["type"] != "disabled" {
+		t.Fatalf("救援请求 thinking=%v want disabled", second["thinking"])
+	}
+	if mt, _ := second["max_tokens"].(float64); mt != 200 {
+		t.Fatalf("救援请求 max_tokens=%v want 200（不得放大）", second["max_tokens"])
+	}
+}
+
+// TestStreamEmptyReplyRescue 流式同一形态：换掉空流而不是把空回复透给客户端。
+// 客户端不应看到第一跳的 finish_reason=length，也不应看到两个 [DONE]。
+func TestStreamEmptyReplyRescue(t *testing.T) {
+	const emptyTruncated = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	const rescued = "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"流式救援\"}}]}\n\n" +
+		"data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	var bodies []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(raw))
+			body := emptyTruncated
+			if len(bodies) > 1 {
+				body = rescued
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"deepseek-v4.1-flash",
+		"stream":true,
+		"max_tokens":200,
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("上游调用次数=%d want 2（首跳 + 救援跳）", len(bodies))
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "流式救援") {
+		t.Fatalf("客户端应拿到救援流正文: %q", out)
+	}
+	if strings.Contains(out, `"length"`) {
+		t.Fatalf("空回复的 finish_reason=length 不应透出: %q", out)
+	}
+	if n := strings.Count(out, "[DONE]"); n != 1 {
+		t.Fatalf("[DONE] 次数=%d want 1: %q", n, out)
+	}
+	var second map[string]any
+	if err := json.Unmarshal([]byte(bodies[1]), &second); err != nil {
+		t.Fatalf("救援请求体非法: %v", err)
+	}
+	th, _ := second["thinking"].(map[string]any)
+	if th["type"] != "disabled" {
+		t.Fatalf("救援请求 thinking=%v want disabled", second["thinking"])
+	}
+}

@@ -170,8 +170,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	e, found := r.entries[key]
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
-		if r.stickyOK(e.uid, model) {
-			r.touch(key, e.uid, now)
+		// stickyOK 通过后仍需 touch 的 CAS 确认：绑定可能在上面的 RUnlock 之后已被
+		// 别的路径改写（见 touch 注释）。CAS 失败即落到慢路径重新解析。
+		if r.stickyOK(e.uid, model) && r.touch(key, e.uid, now) {
 			return e.uid, true
 		}
 		// 绑定号持久失效才重分配；在途满载由 StickyUsable 排除在失效判据之外。
@@ -222,11 +223,25 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 }
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
-func (r *Router) touch(key, uid string, now time.Time) {
+//
+// CAS 语义：写锁内先核对绑定仍是入参 uid 才滚动。快路径从 RUnlock 到加写锁的窗口里，
+// 同一 key 可能已被失败路径 Unbind（解绑）、成功路径 Bind（粘性跟随最终成功号）或慢路径
+// 重分配改写过——无条件回写会把刚解绑的失败号复活、把跟随成功的号冲回旧号，并经
+// SetBind 镜像进 redisstore，连重启都恢复成错误绑定。
+//
+// 返回 false = 绑定已被别的路径改写，本次放弃（以先落地的显式操作为准）；调用方据此
+// 回落到慢路径重新解析，而不是返回一个刚被作废的 uid。
+func (r *Router) touch(key, uid string, now time.Time) bool {
 	r.mu.Lock()
+	e, found := r.entries[key]
+	if !found || e.uid != uid {
+		r.mu.Unlock()
+		return false
+	}
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	return true
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。

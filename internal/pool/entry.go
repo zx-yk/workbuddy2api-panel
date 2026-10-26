@@ -132,12 +132,14 @@ type Status struct {
 }
 
 // ModelCostStatus 单个 (账号, 模型) 的成本台账行（P1-anti-monopoly 可观测性）。
-// tier 不单独落字段：cost_per_1k ≤ 0 即 tier 0（免费），> 0 即 tier 2（收费），
-// 无观测即 tier 1——由调用方/面板按值推出，避免双表示漂移。
+// tier 不单独落字段：判层依据是 last_per_1k（缺失时回退 cost_per_1k），≤0 即 tier 0
+// （免费）、> 0 即 tier 2（收费），无观测即 tier 1——由调用方/面板按值推出，避免双表示漂移。
 type ModelCostStatus struct {
 	Model string `json:"model"`
-	// CostPer1k 实测每千 token 单价（EMA 平滑值）。≤0 = 实测免费（tier 0）。
+	// CostPer1k 指数平滑单价（EMA）。**已不参与判层**，仅作层内排序与残值旁证。
 	CostPer1k float64 `json:"cost_per_1k"`
+	// LastPer1k 最近一次原始观测单价，判层依据。旧台账缺该字段时省略。
+	LastPer1k *float64 `json:"last_per_1k,omitempty"`
 	// LastSeen 最近一次观测时刻（过期即从台账消失，同 modelCostTTL 口径）。
 	LastSeen time.Time `json:"last_seen"`
 	// Samples 累计观测次数（EMA 收敛度参考）。
@@ -190,10 +192,38 @@ const modelCostTTL = 6 * time.Hour
 
 // modelCostEntry 运行时成本账本（持久化镜像 stateModelCost 与其字段一一对应）。
 type modelCostEntry struct {
+	// CostPer1k 指数平滑单价，只作层内排序与展示，**不参与判层**（见 tier）。
 	CostPer1k float64
+	// LastPer1k 最近一次原始观测单价（指针：nil = 引入本字段前的旧数据）。
+	// 判层唯一依据——免费↔收费可双向翻转，不受平滑残值拖累。
+	LastPer1k *float64
 	LastSeen  time.Time
 	Samples   int
 }
+
+// tier 该 (账号, 模型) 的成本层：0 = 实测免费，2 = 实测收费（无观测不在这里表示，
+// 由调用方先判 modelCostOf 是否命中）。
+//
+// 为什么不用 EMA 判层：CostPer1k = prev*0.7 + per1k*0.3 是正数时只会无限逼近 0、
+// 永不等于 0。按 `CostPer1k <= 0` 判免费，一个号只要付过一次费就永久停在收费层，
+// 而收费层被硬过滤 → 拿不到新观测 → 数学上再也回不到免费层（只能等 6h TTL 过期），
+// 结果该模型全部流量压在少数号上。判层改用最近一次原始观测，EMA 残值只作旁证。
+//
+// LastPer1k 为 nil（旧台账）时回退 EMA 口径，行为与引入本字段前一致；旧条目在
+// 恢复侧一次性丢弃（见 applyAccountsLocked），所以回退只是兜底。
+func (mc modelCostEntry) tier() int {
+	if mc.LastPer1k != nil {
+		if *mc.LastPer1k <= 0 {
+			return 0
+		}
+		return 2
+	}
+	if mc.CostPer1k <= 0 {
+		return 0
+	}
+	return 2
+}
+
 type entry struct {
 	a            *auth.Auth
 	credits      int64
@@ -523,9 +553,11 @@ type stateModelCooldown struct {
 }
 
 // stateModelCost 单个 (账号, 模型) 的成本观测持久化记录，与运行态 modelCostEntry
-// 同构（单一表示，内存与落盘不搞两套）。
+// 同构（单一表示，内存与落盘不搞两套）。last_per_1k 为判层依据，omitempty 只为
+// 兼容旧文件；新写入恒带该字段。
 type stateModelCost struct {
 	CostPer1k float64   `json:"cost_per_1k"`
+	LastPer1k *float64  `json:"last_per_1k,omitempty"`
 	LastSeen  time.Time `json:"last_seen"`
 	Samples   int       `json:"samples,omitempty"`
 }

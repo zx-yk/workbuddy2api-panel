@@ -37,12 +37,24 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.5-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.6-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.6 · 2026-10-26
+
+本次为稳定性修复版本，不改变配置与 API 使用方式：
+
+- **会话绑定比较后写入**：并发请求下，绑定只在与读到的账号一致时才滚动活跃时间。此前晚到的请求会把刚解绑的失败号写回、或把已跟随到成功号的绑定冲回旧号，并镜像到外部存储，重启后仍是错误绑定。
+- **成本分层改用最近一次观测**：判「免费 / 收费」的依据从平滑均值改为最近一次原始观测，免费与收费可双向翻转。平滑均值只会无限逼近 0、永不等于 0，导致付过一次费的账号永久留在收费层，而收费层不参与抽号、也就拿不到新观测，同一个模型长期压在少数账号上。平滑值保留用于层内排序与面板展示，面板判「免费」也改用同一口径。
+- **旧成本台账一次性重建**：升级后首次恢复时丢弃没有最近观测值的旧条目，退回「无观测」层，由下一次真实请求重新学习，并在日志中给出丢弃条数。这会重置一次成本学习历史，属预期。
+- **refresh 失效不再等同账号不可用**：刷新凭证失败但访问凭证仍有效时，保活巡检不计失败、对话请求照常发出，不再累计到阈值后禁用账号，也不再因此换号。
+- **连续会话失效计数落盘**：计数增加与清零都标记为待落盘。此前清零不落盘，进程重启后残留旧计数，一次失败即达阈值，刚被成功刷新证明可用的账号会被禁用。
+- **关闭思考与空回复救援**：`reasoning_effort` 为 `off` / `none` / `disabled` 时，DeepSeek 系模型转为 `thinking.type=disabled`，不再降级成「开着但最弱」。同时新增空回复救援：`finish_reason=length`、正文零字节且无工具调用时，以同一 `max_tokens` 关闭思考重发一次，流式与非流式均生效。客户端看到的额度上限不变，有正文的截断与带工具调用的回合不触发。
+- **识别 200 响应中的内嵌失败帧**：顶层 `{code, msg}`（无 `choices` 无 `error`）按失败帧处理并交给账号处置，不再当作正常帧透传并记成功。
 
 ### v1.14.5 · 2026-10-25
 
@@ -330,7 +342,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.5` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.6` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -342,17 +354,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.5-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.5-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.5-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.5-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.5-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.6-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.6-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.6-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.6-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.6-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.5
+V=1.14.6
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

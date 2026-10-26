@@ -105,10 +105,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if !ok {
 			return 1, 0
 		}
-		if mc.CostPer1k <= 0 {
-			return 0, 0
-		}
-		return 2, mc.CostPer1k
+		// 判层用最近一次原始观测（mc.tier()），不用 EMA：见 modelCostEntry.tier 的
+		// 数学说明——EMA 判层会让收费层号码永远回不到免费层。
+		return mc.tier(), mc.CostPer1k
 	}
 	bestTier := 2
 	hasTier1 := false
@@ -285,9 +284,10 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
 		return false
 	}
-	// 1) 本地实测台账：最权威（真实扣费证据）。
+	// 1) 本地实测台账：最权威（真实扣费证据）。判层同选号口径（最近一次原始观测），
+	//    否则会出现"选号认为免费、保底认为收费"两套结论。
 	if mc, ok := e.modelCostOf(model, now); ok {
-		return mc.CostPer1k > 0
+		return mc.tier() == 2
 	}
 	// 2) 上游目录倍率兜底：无实测观测时用牌价判收费，堵住「无观测 = 放行」漏洞。
 	if p.modelRateOf == nil {

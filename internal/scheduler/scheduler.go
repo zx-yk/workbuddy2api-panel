@@ -660,13 +660,23 @@ func (s *Scheduler) runKeepalive(selective bool) {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
+				// RT 失效 ≠ 账号不可用：AT 仍有效时对话照常 200。计死会在连续 3 轮
+				// 保活后永久禁掉一个健康号，故这里只留 INFO 日志（面板错误汇总按 WARN
+				// 聚合，打 WARN 会让「保活失败」长期挂在页面上）。
+				if upstream.SessionDeadButUsable(a) {
+					log.Printf("keepalive %s: refresh dead but access token still valid — keep account, retry later",
+						logfmt.Label(st.UID, st.Nickname))
+					continue
+				}
+				log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
 				}
+				continue
 			}
+			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计

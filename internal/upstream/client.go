@@ -1108,6 +1108,23 @@ func isSessionDead(err error) bool {
 	return errors.As(err, &ue) && ue.Kind == ErrSessionDead
 }
 
+// SessionDeadButUsable 报告「refresh 判死，但账号此刻仍能用」。
+//
+// refresh token 失效与账号不可用是两件事：AT 未过期时上游对话接口照常返回 200。
+// 上游实测（issue #83）：部分账号 refresh 恒回 12153、AT 却还有数周至数月，对话
+// 全 200。把这类号计 session dead，会在连续 3 次保活后永久
+// 禁用一个完全健康的账号——面板一片橙色「疑似登录失效」，对话却秒回。
+//
+// 判据只有一条：AT 是否还能用。不按上游文案判（"Session doesn't have required
+// client" 只是同一次失败的措辞，同一账号重试就变成 "Invalid refresh token"），也不按
+// JWT 的 azp（实测 azp 全是 console，多数 plugin 源 refresh 仍正常）。
+//
+// 只适用于「AT 尚未被上游拒绝」的路径：保活巡检、发请求前的预刷新。chat 路径拿到
+// 上游 401 时 AT 已被拒过，那里 refresh 判死就该计死，不适用本函数。
+func SessionDeadButUsable(a *auth.Auth) bool {
+	return a != nil && !a.NeedsRefresh(0)
+}
+
 // adoptNewerTokensFromDisk 在 refresh 失败后读回 auth 文件：若磁盘 RT 与内存不同
 // （另一进程已刷新并写回），采纳磁盘 token 并返回 true，供调用方重试一次。
 // 读文件失败、解析失败、RT 一致均返回 false（不改内存状态），保持失败语义。
