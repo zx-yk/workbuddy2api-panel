@@ -37,12 +37,22 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.7-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.8-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.8 · 2026-10-27
+
+本次为任务覆盖扩充，不改动请求链路、配置与 API 使用方式：
+
+- **新增 5 个成长任务的「一键完成」**：`WorkBuddy_Valorant`（无畏契约拼豆专家）、`expert_use_maidehao`（中国电商运营专家）、`expert_use_douyinyin`（抖音策略师）、`expert_use_shangjia_xuanchuan`（商家宣传页与海报设计师）、`expert_use_bowangwang`（直播电商教练）。四者与既有 `Expert_lighthouse` 判据同源（召唤链 + 真实对话的服务端 `requestId` + `expert_actual_use(mode=LOCAL)`），故复用同一条事件链，仅按任务码替换专家参数。
+- **专家参数取自任务自身**：专家 id 全部来自任务 `jump_url` 里的 `expertId`，与专家市场真实条目一一对应——服务端判据要求 id 真实存在，编造不计数。昵称（`display_name_zh`）与职业名（`profession_zh`）分别对应判据里的 `name` 与 `expertTitle`，两者都参与校验，不能互换。
+- **市场列表只作校正**：召唤前按 `ExpertID` 精确匹配市场返回条目以校正版本号与昵称，未命中则退回表内静态值。该步骤失败不阻断流程——召唤链本身不依赖它。
+
+支持范围限于可脚本复现的任务；需要真人交互的任务（如关注官方公众号）不在自动化范围内。
 
 ### v1.14.7 · 2026-10-26
 
@@ -352,7 +362,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.7` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.8` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -364,17 +374,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.7-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.7-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.7-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.7-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.7-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.8-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.8-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.8-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.8-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.8-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.7
+V=1.14.8
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
