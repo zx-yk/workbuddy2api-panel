@@ -45,6 +45,7 @@ const (
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrModelBusy                     // 14003 模型容量繁忙 → (账号,模型) 短窗口避让，保留粘性
 	ErrUpstreamBusy                  // 6020/6021 渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + Retry-After
+	ErrToolSequence                  // 11148 tool_call_sequence_broken：工具调用与结果配对损坏 → 请求级错误，不罚号、不轮转，400 透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -76,6 +77,8 @@ func (k ErrKind) String() string {
 		return "model_busy"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
+	case ErrToolSequence:
+		return "tool_sequence"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrChannelRefused:
@@ -138,6 +141,20 @@ var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 // 用完整固定文案（"queue.full"），避免与普通限流文案误撞。
 func isQueueFullBody(lower string) bool {
 	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
+}
+
+// isToolSequenceBroken 判定 11148 tool_call_sequence_broken（工具调用与结果配对损坏）。
+//
+// 双通道：业务码走 codeMarker（JSON 空白容差，避免 `"code": 11148` 这种带空格形态漏判）；
+// 文案兜底两条上游原文——extError 名 tool_call_sequence_broken，以及
+// "tool calls and tool results do not match"（2026-09-20 实机定位 11148 时记录的原文）。
+// lower 是已转小写的 body。
+func isToolSequenceBroken(lower string) bool {
+	if codeMarker(lower, "11148") {
+		return true
+	}
+	return strings.Contains(lower, "tool_call_sequence_broken") ||
+		strings.Contains(lower, "tool calls and tool results do not match")
 }
 
 // accountFaultMarkers 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
@@ -700,6 +717,13 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusBadRequest && codeMarker(lower, "11135") {
 		return ErrImageInvalid
 	}
+	// 11148 tool_call_sequence_broken：assistant 的 tool_calls 与后续 tool 结果对不上
+	// （典型成因是客户端回放历史时改写了配对，见 tool_pairing.go 的修复链）。
+	// 这是确定性的请求级错误——同一 body 换任何账号都是同样的匹配失败，换号只会
+	// 把无效请求放大 MaxRotate 倍打上游，还把健康号喂进连败计数。
+	if status == http.StatusBadRequest && isToolSequenceBroken(lower) {
+		return ErrToolSequence
+	}
 	if status == http.StatusBadRequest {
 		for _, m := range invalidImageMarkers {
 			if strings.Contains(lower, m) {
@@ -840,9 +864,15 @@ type CreditObserver func(uid string, credits int64)
 func New() *Client {
 	tr := newTransport()
 	c := &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		ChatBaseCN:    "https://copilot.tencent.com",
+		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		// ChatBaseCN 取官方桌面端的对话主域 www.workbuddy.cn。copilot.tencent.com
+		// 只是桌面端 NetworkFailover 列表里的**备选**入口——用它发全部 CN 对话是
+		// 可判别的形态差异（官方客户端近一个月运行时日志 network-failover.jsonl 里
+		// 出现过的 origin 只有 workbuddy.cn，copilot 零次）。需要回退时用 cn.chat_base 覆盖。
+		// 注意 BillingBase 保持 www.codebuddy.cn：任务计分按「CLI 指纹在 codebuddy.cn、
+		// 桌面指纹在 chat 域」区分，改这里会连带改掉 CLI 类任务的指纹来源。
+		ChatBaseCN:    "https://www.workbuddy.cn",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
@@ -1901,7 +1931,7 @@ func v3ConfigDomain(a *auth.Auth, chatBase string) string {
 	if u, err := url.Parse(chatBase); err == nil && u.Host != "" {
 		return u.Host
 	}
-	return "copilot.tencent.com"
+	return "www.workbuddy.cn"
 }
 
 // fetchV3ConfigModelMap 拉官方 IDE 配置目录，按模型 id 建能力表。

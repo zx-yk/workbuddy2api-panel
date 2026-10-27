@@ -38,6 +38,14 @@ func TestClassify(t *testing.T) {
 		{403, `{"code":"11-128","msg":"request illegal"}`, ErrChannelRefused},
 		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
 		{403, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		// 11148 tool_call_sequence_broken：工具调用与后续 tool 结果配对不上。
+		// 这是确定性的请求级错误——同一 body 换任何账号都是同样的匹配失败，
+		// 误归 ErrClient 会让它消耗轮换预算并把健康号喂进连败计数。
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolSequence},
+		{400, `{"code": 11148,"extError":"tool_call_sequence_broken"}`, ErrToolSequence},
+		{400, `{"code":11148,"msg":"unrelated wording"}`, ErrToolSequence},
+		// 对照：相邻的请求级错误码不能被吞进来。
+		{400, `{"code":11101,"msg":"Unmarshal chat params failed"}`, ErrBadParams},
 		// 无 code 的裸 "request illegal" 不归属任何账号级判定（宁可走通用 4xx 兜底，
 		// 也不能凭一句文案硬禁用账号）。
 		{400, `{"msg":"request illegal"}`, ErrClient},

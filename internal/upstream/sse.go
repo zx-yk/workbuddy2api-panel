@@ -26,6 +26,52 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// FirstFrameRejected 上游首个帧就是失败帧，且此刻尚未向客户端写出任何字节。
+//
+// 为什么单独成一个类型：这是**唯一还能换号重试的时机**。一旦写出第一字节，HTTP
+// 响应头就已提交，本可换号解决的失败只能以 200 + error 帧透给客户端（头退不回来）。
+// 上游实测形态：`{code:11140,msg:"request illegal"}`（账号被限）、`{code:6021,
+// msg:"queue.full.title"}`（渠道队列满）都会以 HTTP 200 的 SSE 首帧出现。
+//
+// Kind 已按 Classify 归好类，上层接 applyErrorPolicy 即可；它是否值得换号由
+// firstFrameRejectable 把关（换号也没用的类别继续走透传，不放大无效请求）。
+type FirstFrameRejected struct {
+	Kind ErrKind
+	Body string
+}
+
+func (e *FirstFrameRejected) Error() string {
+	msg := e.Body
+	if len(msg) > 120 {
+		msg = msg[:120] + "…"
+	}
+	return fmt.Sprintf("upstream first frame rejected (%s): %s", e.Kind, msg)
+}
+
+// firstFrameRejectable 首帧否决只对「换个账号可能就是好的」类别生效。
+//
+// 排除项都是换号必然重撞同一堵墙的：6021 渠道队列满（ErrUpstreamBusy）、请求体
+// 畸形（ErrBadParams）、上下文超限（ErrPromptTooLong）、图片无效（ErrImageInvalid）、
+// 工具序列损坏（ErrToolSequence）。对它们否决只会把无效请求放大 N 倍打上游，
+// 还不如按原逻辑把上游原文透传给客户端。
+func firstFrameRejectable(k ErrKind) bool {
+	switch k {
+	case ErrSoftRate, ErrAccountFault, ErrHardCredit, ErrServer, ErrModelBlocked, ErrSessionDead:
+		return true
+	}
+	return false
+}
+
+// clearStreamHeaders 撤销 StreamHint 开头设过的 SSE 响应头。
+// 首帧否决后这次请求不会以流式返回：header 里留着 text/event-stream 会让换号后
+// 的成功响应、或最终兜底的 JSON 错误带上错 Content-Type。
+func clearStreamHeaders(h http.Header) {
+	h.Del("Content-Type")
+	h.Del("Cache-Control")
+	h.Del("Connection")
+	h.Del("X-Accel-Buffering")
+}
+
 // streamReadError 标记上游响应体的读失败，与写给客户端时的写失败区分。
 type streamReadError struct{ err error }
 
@@ -838,23 +884,33 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if fr := firstFinishReason(obj); fr != "" {
 			finishReason = fr
 		}
-		// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
-		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
-		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
-		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-		if _, hasErr := obj["error"]; hasErr {
+		// 失败帧有两个形状：带 error 键的，以及顶层 {code,msg}（无 error 无 choices，
+		// 11140 request illegal / 6021 queue.full 的实测形态）。两者必须走同一路
+		// 首帧否决判据——只认 error 键会漏掉后者，让本可换号的失败被当成正常帧透传。
+		//
+		// 首帧否决：还没写过任何字节时，失败帧不该透传——这是唯一还能换号的时机
+		// （写出第一字节即提交响应头，之后只能 200+error 帧透给客户端）。是否值得
+		// 换号由 firstFrameRejectable 把关：6021 队列满 / 请求体畸形这类换号也没用的
+		// 类别继续走下面的透传，避免把无效请求放大 N 倍打上游。
+		_, hasErr := obj["error"]
+		if hasErr || isBareErrorFrame(obj) {
+			if !committed && !contentSeen && !sawToolCalls {
+				if k := Classify(http.StatusOK, payload); k != ErrNone && firstFrameRejectable(k) {
+					// 观测不因否决而断：账号处置虽然交给上层接手，但观察者（请求日志、
+					// 测试探针）拿到的失败帧原文必须与透传路径一致，否则这类失败会
+					// 在观测面上凭空消失。
+					if o.onErrorFrame != nil {
+						o.onErrorFrame(payload)
+					}
+					clearStreamHeaders(h)
+					return 0, &FirstFrameRejected{Kind: k, Body: payload}
+				}
+			}
+			// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
+			// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
+			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
+			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
-			if o.onErrorFrame != nil {
-				o.onErrorFrame(payload)
-			}
-			if werr := writeRaw(payload); werr != nil {
-				return 0, werr
-			}
-			return 1, nil
-		}
-		// 顶层 {code,msg}（无 error 无 choices）同属失败帧形态：11140 安全审核、
-		// 6021 队列满的实测形态。以错误帧口径落定，并交给观察者按账号处置。
-		if isBareErrorFrame(obj) {
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)
 			}

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -193,9 +194,13 @@ func TestStreamRescueSkippedWhenContentExists(t *testing.T) {
 	}
 }
 
-// TestBareErrorFrameDetectedAndObserved 顶层 {code,msg}（无 error 无 choices）是上游
-// 11140 审核 / 6021 队列满的实测失败形态：必须按错误帧处置，不能当正常帧透传并记成功。
-func TestBareErrorFrameDetectedAndObserved(t *testing.T) {
+// TestBareErrorFrameFirstFrameRejected 顶层 {code,msg}（无 error 无 choices）是上游
+// 11140 审核 / 6021 队列满的实测失败形态。当它出现在**首帧**且是「换个号可能是好的」
+// 类别时，StreamHint 必须否决整条流（返回 FirstFrameRejected、不写任何字节），
+// 让上层还有换号的机会——写出第一字节响应头就提交了，之后只能 200+error 帧透传。
+//
+// 观察者仍要拿到原文：账号处置交给上层，但观测面不能因为否决而丢了这次失败。
+func TestBareErrorFrameFirstFrameRejected(t *testing.T) {
 	payload := `{"code":11140,"msg":"request illegal","requestId":"r1"}`
 	stream := strings.Join([]string{
 		"data: " + payload,
@@ -207,14 +212,72 @@ func TestBareErrorFrameDetectedAndObserved(t *testing.T) {
 	var got string
 	err := StreamHint(rec, strings.NewReader(stream), nil,
 		WithErrorFrameObserver(func(p string) { got = p }))
+
+	var ff *FirstFrameRejected
+	if !errors.As(err, &ff) {
+		t.Fatalf("首帧失败应返回 FirstFrameRejected，实际 err=%v", err)
+	}
+	if ff.Kind != ErrAccountFault {
+		t.Errorf("Kind=%v want ErrAccountFault（11140 是账号级故障，值得换号）", ff.Kind)
+	}
+	if ff.Body != payload {
+		t.Errorf("Body=%q want 原文", ff.Body)
+	}
+	if got != payload {
+		t.Errorf("观察者未收到失败帧原文: %q", got)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("否决时不得向客户端写出任何字节（否则响应头已提交、无法换号），body=%q", rec.Body.String())
+	}
+	// SSE 头必须撤掉，否则换号后的成功响应 / 最终 JSON 错误会带错 Content-Type。
+	if ct := rec.Header().Get("Content-Type"); ct != "" && strings.Contains(ct, "event-stream") {
+		t.Errorf("否决后残留 SSE Content-Type=%q，会让后续响应带错类型", ct)
+	}
+}
+
+// TestBareErrorFrameQueueFullStillPassesThrough 6021 渠道队列满**不**否决：
+// 换任何账号都撞同一堵墙，否决只会把无效请求放大 N 倍，应维持原透传。
+func TestBareErrorFrameQueueFullStillPassesThrough(t *testing.T) {
+	payload := `{"code":6021,"msg":"queue.full.title","requestId":"r2"}`
+	stream := strings.Join([]string{
+		"data: " + payload,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+
+	rec := httptest.NewRecorder()
+	var got string
+	err := StreamHint(rec, strings.NewReader(stream), nil,
+		WithErrorFrameObserver(func(p string) { got = p }))
 	if err != nil {
-		t.Fatalf("StreamHint: %v", err)
+		t.Fatalf("6021 不该否决，实际 err=%v", err)
 	}
 	if got != payload {
 		t.Fatalf("观察者未收到失败帧原文: %q", got)
 	}
-	if !strings.Contains(rec.Body.String(), `11140`) {
-		t.Fatalf("失败帧应透传给客户端，body=%q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "6021") {
+		t.Fatalf("6021 应原样透传给客户端，body=%q", rec.Body.String())
+	}
+}
+
+// TestBareErrorFrameAfterContentStillPassesThrough 已经有正文之后再出现失败帧时不否决：
+// 响应头早已提交，只能透传（这也是「否决只在首帧有意义」的反向保险）。
+func TestBareErrorFrameAfterContentStillPassesThrough(t *testing.T) {
+	payload := `{"code":11140,"msg":"request illegal","requestId":"r3"}`
+	stream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		"data: " + payload,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, strings.NewReader(stream), nil, WithErrorFrameObserver(func(string) {}))
+	if err != nil {
+		t.Fatalf("已提交的流不该返回错误，实际 err=%v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "11140") {
+		t.Fatalf("中途失败帧应透传，body=%q", rec.Body.String())
 	}
 }
 

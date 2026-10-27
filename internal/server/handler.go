@@ -878,7 +878,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserveCapacityBinding 表示绑定号曾命中 14003 容量短窗口；本轮即使用
 	// 其他账号临时代理成功，也保留原会话绑定，待短窗口后回到原账号。
 	preserveCapacityBinding := false
+	// 429 软限流不消耗轮换预算（见下方 ErrSoftRate 的 i-- 豁免）：
+	//   - attempt 是真实尝试次数，只用于 rotateBackoff 的退避阶梯——豁免掉的
+	//     429 也要逐级退避，不能因为 i 不涨就原地高频重试同一个出口；
+	//   - softRateSwaps 是豁免次数，用「账号总数 + MaxRotate」作硬上限兜底：
+	//     每个账号最多被 429 一次就带上冷却标记、下一次 Pick 自然排除它，理论上
+	//     换到没有未冷却号就会收敛；但并发下 Pick 可能把刚冷却的号又捞回来，
+	//     没有硬上限会原地打转。
+	poolTotal, _, _, _, _ := h.cfg.Pool.CountsDetailed()
+	maxSoftRateSwaps := poolTotal + h.cfg.MaxRotate
+	softRateSwaps := 0
+	attempt := 0
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		attempt++
 		stickyOverflow = false
 		// 选号：粘性号优先，临时满载与持久不可用分别处理。
 		var acct *auth.Auth
@@ -1124,6 +1136,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11148 工具调用记录损坏：与 ErrBadParams 同待遇。同一 body 换任何账号
+			// 都是同样的配对失败（配对是在服务端按消息序列校验的，与账号无关），
+			// 轮转只会把无效请求放大 MaxRotate 倍，还会把健康号喂进连败计数。
+			// 立即透传上游原文回 400，并给可操作提示（重开会话/修好配对再试）。
+			if kind == upstream.ErrToolSequence {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "tool_call_sequence_broken: tool_calls and tool results do not match"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_sequence_broken", msg,
+					h.hintOf(upstream.ErrToolSequence, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 14003 是 (账号,模型) 的暂时性容量窗口：写短冷却后继续换号，
 			// 但绑定号只释放在途租约、不解除会话；临时代理成功也不改绑。
 			if kind == upstream.ErrModelBusy {
@@ -1179,8 +1208,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
 				break
 			}
-			if !rotateBackoff(i, r.Context()) {
+			if !rotateBackoff(attempt-1, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
+			}
+			// 429 软限流不消耗轮换预算：任意 429 形态都只是「这个号此刻被限」，
+			// 换下一个未冷却的号才是正解；把预算耗在限流号上，会让本该成功的请求
+			// 提前把 429 交给客户端。豁免次数有硬上限（见循环前的 softRateSwaps）。
+			if kind == upstream.ErrSoftRate && softRateSwaps < maxSoftRateSwaps {
+				softRateSwaps++
+				i-- // 抵消 for 的 i++：本次不计入 MaxRotate
 			}
 			continue
 		}
@@ -1229,6 +1265,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
 				upstream.WithMarkupRepair(repair), upstream.WithEmptyReplyRescue(rescue))
+			// 首帧就被否：上游用 HTTP 200 开流、首帧直接是失败帧（11140 request
+			// illegal / 6004 限流等），且 StreamHint 尚未向客户端写出任何字节——
+			// 这是唯一还能换号的时机。一旦写出第一字节响应头即提交，只能 200+error
+			// 帧透传。换号也没用的类别（6021 队列满 / 体畸形 / 上下文超限）已在
+			// sse 侧被 firstFrameRejectable 挡掉，不会走到这里。
+			var ff *upstream.FirstFrameRejected
+			if errors.As(sErr, &ff) {
+				rc.Close()
+				h.applyErrorPolicy(acct.UID, ff.Kind, ff.Body, bareModel, nil)
+				fail(acct.UID)
+				lastErr = &upstream.Error{Kind: ff.Kind, Status: http.StatusOK, Msg: ff.Body}
+				log.Printf("INFO: [server] stream acct=%s model=%s: first frame rejected kind=%s — rotating (no byte written yet)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, ff.Kind)
+				if !rotateBackoff(attempt-1, r.Context()) {
+					st.status = http.StatusServiceUnavailable
+					st.outcome = reqlog.OutcomeStreamError
+					return
+				}
+				continue
+			}
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1794,6 +1850,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；chatCompletions
 		// 已 fail-fast 400 透传原文、终止轮转——「换号可能有不同模型权限」属 11102
 		// （ErrModelBlocked）的分类域，与本类无关。
+	case upstream.ErrToolSequence:
+		// 11148 工具调用记录损坏：请求的消息序列本身配对不上（assistant 的
+		// tool_calls 与后续 tool 结果对不齐），换任何账号结果都一样。零动作
+		// （不冷却/不熔断/不 NoteError/不喂连败），chatCompletions 已 fail-fast
+		// 400 透传上游原文并终止轮转。
 	case upstream.ErrUpstreamBusy:
 		// 6020/6021 渠道级容量满载：账号余额健康、未限流、session 未死，
 		// 换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError/不喂连败，同

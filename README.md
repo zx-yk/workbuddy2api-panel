@@ -37,12 +37,21 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.9-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.15.0-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.15.0 · 2026-10-28
+
+本次三项都是「让请求行为更像官方客户端」与「错误处置更准」，不改 API 契约：
+
+- **CN 对话主域默认改为 `www.workbuddy.cn`**：官方桌面端 `product.json` 的 endpoint 就是它，`copilot.tencent.com` 只是其 `NetworkFailover` 列表里的**备选**入口。此前网关把全部 CN 对话从备选域发出，是可判别的形态差异——官方客户端运行时日志（`network-failover.jsonl`）里出现过的 origin 只有 `www.workbuddy.cn`，`copilot` 零次。两域业务语义实测等价（`/v3/config` 与 `/v2/chat/completions` 返回逐字节一致，仅 `requestId` 不同）。需要回退时用 `cn.chat_base` 覆盖即可，无需改代码。`BillingBase` 保持 `www.codebuddy.cn` 不动——任务计分按「CLI 指纹在 codebuddy.cn、桌面指纹在 chat 域」区分，动它会连带改掉 CLI 类任务的指纹来源。
+- **首帧否决：200 开流但首帧即失败时改为换号重试**：上游存在「HTTP 200 已开流、首帧直接是失败帧」的形态（`11140 request illegal`、`6004` 限流等）。此前只能把失败帧透传给客户端——因为写出第一字节时响应头就提交了，退不回来。现在只要**尚未向客户端写出任何字节**，就把这次失败交回上层按分类处置并换号。仅对「换个账号可能就是好的」类别生效（限流 / 账号级故障 / 余额不足 / 5xx / 模型不可用 / 会话失效）；`6021` 渠道队列满、请求体畸形、上下文超限、图片无效、工具序列损坏这些换号也必然重撞的，维持原样透传，避免把无效请求放大 N 倍。已提交的流（出过正文）不受影响，失败帧照常透传。
+- **429 不再消耗换号预算**：任意 429 形态（含 `14017`/`14018`/`11140`/`12153` 落入软限流的分支）换号时不再计入 `MaxRotate`，一直换到没有未冷却账号才把 429 交回客户端。此前全池被限流时，试满 `MaxRotate` 个就把 429 丢给调用方。豁免有硬上限（账号总数 + `MaxRotate`）兜底：并发下选号可能把刚冷却的账号又捞回来，没有上限会原地打转。
+- **`11148` 按请求级错误处置**：上游 `tool_call_sequence_broken`（assistant 的 `tool_calls` 与后续 `tool` 结果对不上，典型成因是客户端回放历史时改写了配对）此前落进通用 4xx，会消耗换号预算、还把健康账号喂进连败计数。现在识别为确定性请求级错误：不罚号、不轮转，`400` 透传上游原文并附可操作提示（补齐 `tool` 回复或重开会话）。
 
 ### v1.14.9 · 2026-10-27
 
@@ -167,7 +176,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy / WorkBuddy（`www.workbuddy.cn`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -229,7 +238,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ### 实现原理（简述）
 
-任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（`copilot.tencent.com` + `WorkBuddy/5.5.6` UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + `x-client-platform: web`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
+任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（chat 域——默认 `www.workbuddy.cn`，可用 `cn.chat_base` 覆盖——+ `WorkBuddy/5.5.6` UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + `x-client-platform: web`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
 
 > ⚠️ 行为事件按天幂等：重复点「一键完成」不会重复扣资源，已达标的任务自动跳过。
 
@@ -339,7 +348,7 @@ flowchart LR
 
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
-    U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
+    U -->|"chat/completions (SSE)"| CB["CodeBuddy\nwww.workbuddy.cn"]
     U -->|"billing / auth / growth"| CB
 ```
 
@@ -369,7 +378,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.9` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.15.0` / `1.15`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -381,17 +390,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.9-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.9-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.9-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.9-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.9-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.15.0-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.15.0-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.15.0-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.15.0-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.15.0-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.9
+V=1.15.0
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
@@ -1049,8 +1058,9 @@ http://127.0.0.1:7863/panel/
 
 上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档；路径及 Host 以代码内常量为准（见文末出处表）。两类 base：
 
-- **`copilot.tencent.com`**：聊天补全（SSE）、token 刷新、OAuth、模型列表、growth 域（旅行 / streak）
-- **`www.codebuddy.cn`**：每日签到、余额查询、活跃上报
+- **`www.workbuddy.cn`**：聊天补全（SSE）、模型目录、growth 域（旅行 / streak）、专家与知识库——官方桌面端 `product.json` 的 endpoint。备选入口 `copilot.tencent.com` 对海外出口的 TLS 握手会直接复位，需要回退时用 `cn.chat_base` 回填
+- **`www.codebuddy.cn`**：每日签到、余额查询、活跃上报、小程序上报（CLI 指纹域，任务计分依赖）
+- **`copilot.tencent.com`**：OAuth 与 token 刷新（官方 CLI 口径，`internal/panel/login.go` 单独维护，与对话主域不同源）
 
 | 相对路径（绝对路径见出处表） | 方法 | 用途 |
 |---|---|---|
