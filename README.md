@@ -37,12 +37,19 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.8-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.14.9-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.14.9 · 2026-10-27
+
+本次为可用性补齐，不改动请求链路与既有配置语义：
+
+- **面板补齐三个调度配置项**：`v1.14.7` 新增的 `schedule.balance_refresh_jitter_permill`（余额刷新间隔抖动）、`schedule.task_sweep_jitter_permill`（补领清扫间隔抖动）、`schedule.night_account_cap`（夜间参与账号上限）此前只有后端键、面板配置页没有输入框，只能手改配置文件。现已在「后台刷新余额」「任务补领清扫」两处各加一个抖动输入（0–500 千分比，0 = 固定间隔），并在成长任务区加「夜间参与账号上限」（0 = 不限）。三项均沿用既有的 `schedule` 热生效路径，保存后无需重启。
+- **`GET /v1/models` 兼容 `x-api-key`**：此前 `/v1/messages` 认 `x-api-key`（Anthropic 官方 SDK 的携带方式），而 `/v1/models` 只认 `Bearer`——同一把 key 能调通对话却列不出模型。现在两种携带方式都认；`401` 的错误体按请求方协议分形，带 `x-api-key` 或 `anthropic-version` 的回 Anthropic 口径，用 `Bearer` 的仍回 OpenAI 口径，避免 OpenAI 客户端把「密钥不对」误读成网关故障。
 
 ### v1.14.8 · 2026-10-27
 
@@ -362,7 +369,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.8` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.14.9` / `1.14`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -374,17 +381,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.14.8-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.14.8-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.14.8-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.14.8-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.14.8-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.14.9-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.14.9-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.14.9-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.14.9-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.14.9-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.14.8
+V=1.14.9
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

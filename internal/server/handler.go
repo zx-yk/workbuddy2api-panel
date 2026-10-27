@@ -155,7 +155,7 @@ func NewHandler(cfg Config) *Handler {
 	// GET 回 426 让 Codex 一次握手就回落 HTTPS，不必空转重连。
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
-	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -218,6 +218,39 @@ func isSearchPath(path string) bool {
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withDualAuth 同时认 Bearer（OpenAI 客户端）与 x-api-key（Anthropic SDK）两种携带方式。
+//
+// 为什么需要：路由挂载不对称。/v1/messages 与 /messages 挂 withAnthropicAuth（认
+// x-api-key），而 GET /v1/models 只挂 withAuth（只认 Bearer）。Anthropic 官方 SDK 的
+// 模型发现默认带 x-api-key，模型发现又是它的标准启动动作 —— 同一把 key 能调通 messages
+// 却列不出模型，只能收到 401。
+//
+// 实现只在 Authorization 为空时把 x-api-key 提升到标准头，后半段仍走同一套
+// httpauth.VerifyBearer：不引入第二条比较路径，常量时间比较的性质不变。
+//
+// 401 错误体按请求方协议分形：带 x-api-key 或 anthropic-version 的回 Anthropic 口径，
+// 否则维持 OpenAI 口径。若图省事直接换用 withAnthropicAuth，用 Bearer 拉模型的 OpenAI
+// 客户端在 401 时会收到 Anthropic 形状的错误体，把「密钥不对」误报成「网关坏了」。
+func (h *Handler) withDualAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		viaAnthropic := r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != ""
+		if r.Header.Get("Authorization") == "" {
+			if k := r.Header.Get("x-api-key"); k != "" {
+				r.Header.Set("Authorization", "Bearer "+k)
+			}
+		}
+		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			if viaAnthropic {
+				writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
+				return
+			}
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}

@@ -992,11 +992,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               </div>
             </div>
             <div class="hr"></div>
-            <div class="grid2">
+            <div class="grid3">
               <div class="switch"><span class="lb">后台刷新余额</span>
                 <input type="checkbox" name="balance_refresh_enabled"></div>
               <label class="fld"><span class="lb">刷新间隔（分钟）</span>
                 <input name="balance_refresh_minutes" type="number" min="1" placeholder="5"></label>
+              <label class="fld"><span class="lb">间隔抖动（千分比）</span>
+                <input name="balance_refresh_jitter_permill" type="number" min="0" max="500" placeholder="0">
+                <span class="hint">0 = 固定间隔；200 = 每轮在 ±20% 内随机</span></label>
             </div>
             <div class="hr"></div>
             <div class="grid2">
@@ -1006,12 +1009,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="growth_hours" placeholder="1">
                 <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
             </div>
-            <div class="hr"></div>
             <div class="grid2">
+              <label class="fld"><span class="lb">夜间参与账号上限</span>
+                <input name="night_account_cap" type="number" min="0" placeholder="0">
+                <span class="hint">0 = 不限。大于 0 时，夜猫子（23:00–08:00 窗口内的 glm-5.2 真实对话补足）只让积分最高的前 N 个账号参与，其余夜间静默；白天的任务仍全池保号</span></label>
+            </div>
+            <div class="hr"></div>
+            <div class="grid3">
               <div class="switch"><span class="lb">任务补领清扫</span>
                 <input type="checkbox" name="task_sweep_enabled" checked></div>
               <label class="fld"><span class="lb">清扫间隔（分钟）</span>
                 <input name="task_sweep_minutes" type="number" min="1" placeholder="15"></label>
+              <label class="fld"><span class="lb">间隔抖动（千分比）</span>
+                <input name="task_sweep_jitter_permill" type="number" min="0" max="500" placeholder="0">
+                <span class="hint">0 = 固定间隔；200 = 每轮在 ±20% 内随机</span></label>
             </div>
             <div class="hint">周期扫描全部账号，把「进度已达标但尚未领奖」的成长任务补领掉（不含自动动作的口令任务也能领），并顺带接受未接受的任务。只发 accept / claim 两条<b>幂等</b>请求，不跑任何对话或上报行为，开销可忽略。<br>用途：真实对话点亮的任务不在自动动作白名单里，成长队列与「一键完成」都不会去领它——积分因此卡在半路上不去（#174）。</div>
             <div class="hr"></div>
