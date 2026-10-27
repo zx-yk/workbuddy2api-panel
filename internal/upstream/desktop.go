@@ -1,11 +1,11 @@
-// desktop.go 桌面客户端（WorkBuddy Desktop 5.5.6）行为指纹上报。
+// desktop.go 桌面客户端行为指纹上报（版本随 clientVersion 走，见 desktopUA）。
 //
 // 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md）。桌面端点亮
 // 「需电脑端」类任务的关键不是独立端点，而是同一 POST /v2/report 通道上
 // **不同的客户端指纹**：
 //
 //	POST https://copilot.tencent.com/v2/report        ← chatBase（CLI 上报走 billingBase）
-//	User-Agent: WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1
+//	User-Agent: WorkBuddy/<clientVersion> WorkBuddy/<clientVersion> CLI/<cliVersion>
 //	X-Domain: copilot.tencent.com, X-Product: SaaS, X-User-Id: <uid>
 //	Body: [ {...event...} ]                           ← 数组
 //
@@ -40,9 +40,18 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
-	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 )
+
+// desktopUA 桌面客户端 UA，按官方 buildVlmGatewayHeaders 的拼法：
+// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cli>`。
+//
+// 版本取 clientVersion() 与 cliVersion() 同一来源——此前这条是硬编码 5.5.6，
+// 而 chat 头走 defaultClientVersion（5.5.4），同一账号两条通道报出两个版本，
+// 是可判别的内部不一致（上游 aibyhub 也修过同一处「5.5.6 残留」）。
+func (c *Client) desktopUA() string {
+	v := c.clientVersion()
+	return "WorkBuddy/" + v + " WorkBuddy/" + v + " CLI/" + c.cliVersion()
+}
 
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
@@ -57,9 +66,38 @@ func deriveID(a *auth.Auth, salt string) string {
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
 type DesktopEvent map[string]any
 
+// desktopHardware 按账号稳定派生一台「看起来合理」的 Windows 机器参数。
+//
+// 此前 cpuCores=20 / memorySize=24 / osVersion=10.0.26220 是**所有账号共用**的同一套
+// 硬编码值——多个账号向同一后台汇报同一台机器，是可判别的关联信号，比「参数是否
+// 等于某台真机」更要紧（上游 aibyhub 从另一条路径也踩到同类问题）。
+//
+// 改为按 uid 从真实常见配置里确定性挑选：账号间互异、单账号跨重启稳定，
+// 且组合都是市面上真实存在的机型（核数:内存GB:Windows build）。
+func desktopHardware(a *auth.Auth) (cpuCores, memoryGB int, osVersion string) {
+	table := []struct {
+		cpu, mem int
+		build    string
+	}{
+		{8, 16, "10.0.22631"},
+		{12, 32, "10.0.22631"},
+		{16, 32, "10.0.22621"},
+		{20, 32, "10.0.26100"},
+		{24, 64, "10.0.26100"},
+		{6, 8, "10.0.22000"},
+		{10, 16, "10.0.19045"},
+		{14, 24, "10.0.22621"},
+		{4, 8, "10.0.19045"},
+	}
+	sum := sha256.Sum256([]byte("wb2a:hw:" + a.UID))
+	c := table[int(sum[0])%len(table)]
+	return c.cpu, c.mem, c.build
+}
+
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
-func desktopFingerprint(a *auth.Auth) map[string]any {
+func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
+	cpuCores, memoryGB, osVersion := desktopHardware(a)
 	return map[string]any{
 		"timezone":     "Asia/Shanghai",
 		"reportDelay":  2000,
@@ -71,16 +109,16 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
+		"ideVersion":   c.clientVersion(),
 		"machineId":    deriveID(a, "machine"),
 		"sessionId":    deriveID(a, "session"),
 		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
+		"extVersion":   c.clientVersion(),
 		"os":           "win32",
 		"arch":         "x64",
-		"osVersion":    "10.0.26220",
-		"cpuCores":     20,
-		"memorySize":   24,
+		"osVersion":    osVersion,
+		"cpuCores":     cpuCores,
+		"memorySize":   memoryGB,
 		"timestamp":    now,
 		"presentAt":    now,
 	}
@@ -93,7 +131,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
 	}
-	fp := desktopFingerprint(a)
+	fp := c.desktopFingerprint(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -116,10 +154,12 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUA())
 	req.Header.Set("X-Domain", c.desktopBase(a))
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
+	// X-Request-ID 恒 32 位小写 hex（官方形态）。此前是 deriveID(36hex)+纳秒后 6 位
+	// 的 42 字符混合串——长度与字符集都偏离，且与同批其它通道的纯纳秒数字并存。
+	req.Header.Set("X-Request-ID", session.NewMessageID())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -217,7 +257,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUA())
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -297,7 +337,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 
 // ---------------------------------------------------------------------------
 // 2026-09-12 第五轮：客户端 asar 逆向 + Sunny 真实样本驱动的新判据（三账号实测点亮）。
-// 来源：WorkBuddy.exe 5.5.6 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
+// 来源：官方桌面端 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
 // （data/desktop-task-protocol.md §7.3）。
 // ---------------------------------------------------------------------------
 
@@ -394,7 +434,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUA())
 	req.Header.Set("X-Domain", c.chatBase(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
@@ -442,17 +482,22 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
+	h.Set("User-Agent", c.desktopUA())
 	h.Set("X-Domain", c.chatBase(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
-	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
+	// X-Request-ID 恒 32 位小写 hex（官方形态）。此前是 19 位纳秒数字——
+	// 与同批 desktop 上报通道的形态也不一致，两处都统一到 session.NewMessageID。
+	h.Set("X-Request-ID", session.NewMessageID())
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
+	// X-Private-Data 桌面端恒 true——这条专家路径此前独独漏了它，而主 chat 路径
+	// 也没有（两边都不发，等于整条链路缺同一个头）。
+	h.Set("X-Private-Data", "true")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
+	h.Set("X-IDE-Version", c.clientVersion())
 	h.Set("x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)

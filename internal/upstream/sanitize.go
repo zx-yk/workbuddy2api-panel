@@ -19,6 +19,8 @@ var sanitizeFeatures = []string{
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"Codex CLI is an open source",                     // Codex 说明句（上游首行触发 token）
+	"Tokens prefixed with @ are paths",                // DSH 路径提示句首（与下句连排触发）
 	"11128",                                           // 上游反探测：裸数字错误码
 }
 
@@ -65,6 +67,22 @@ var sanitizeRewrites = [][2]string{
 		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
 		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
 		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+	},
+	{
+		// Codex 说明句：上游把它列为 system 首行的触发 token（dddmiku 2026-10-17
+		// 的 12 组对照实验：`Codex CLI is an open source project led by OpenAI`）。
+		// 注意它与我们已在处理的 "You are a coding agent running in the Codex CLI"
+		// **不是同一句**——那句是 instructions 首段，这句是独立说明句。
+		// open source → open-source 一词之差即可绕过，语义不变。
+		"Codex CLI is an open source project led by OpenAI",
+		"Codex CLI is an open-source project led by OpenAI",
+	},
+	{
+		// DSH 系统提示里的两句路径说明：相邻连排即触发渠道校验（2026-10-27 实测，
+		// 单句各自 200）。只在 "are paths" 后插入 that 拆断连排、语义不变；
+		// 匹配串不带结尾标点，句号与换行两种形态一并覆盖。
+		"Tokens prefixed with @ are paths the user explicitly referenced",
+		"Tokens prefixed with @ are paths that the user explicitly referenced",
 	},
 	{
 		// 上游反探测：只要请求体里出现裸数字 11128 就整单拦截（与该数字的上下文无关——

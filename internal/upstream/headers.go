@@ -3,6 +3,7 @@
 package upstream
 
 import (
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -14,9 +15,9 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
+	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.9.3）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.5.4"
+	defaultClientVersion = "5.9.3"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
 	defaultCliVersion = "2.137.1"
@@ -197,8 +198,21 @@ type ChatMeta struct {
 // meta 为会话头族元数据（纯新增，不改既有头），见 injectConversationHeaders。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
 	c.CommonHeaders(req, a)
-	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	// Accept 保持 application/json：官方 applyGatewayHeaders 就是这一个值，
+	// 不用 Accept 协商 SSE（上游按请求体的 stream=true 决定回什么）。
+	// 此前发 "application/json, text/event-stream" 属于多出来的形态差异。
+	req.Header.Set("Accept", "application/json")
+	// 剥离 REST 通用层头：官方桌面端 chat 的构造（applyGatewayHeaders +
+	// buildVlmGatewayHeaders）里**没有** Origin/Referer/Accept-Language/
+	// X-Machine-ID/X-Session-ID——它们由 CommonHeaders 为 billing/checkin 等
+	// REST 接口准备，chat 不该继承。
+	//
+	// 注意：dddmiku 2026-10-17 的 12 组对照实验证明这些头**不参与**渠道校验
+	// （带齐/去掉都是 PASS），所以剥离不是为了"过校验"，而是减少形态差异、
+	// 降低被跨账号关联的暴露面。剥离不影响功能。
+	for _, h := range []string{"Origin", "Referer", "Accept-Language", "X-Machine-ID", "X-Session-ID"} {
+		req.Header.Del(h)
+	}
 	// AccessToken 加锁快照：keepalive 定时刷新会在 a.mu 内改写它，锁外直读构成数据竞争
 	// （见 auth.AccessTokenValue 注释）。
 	if at := a.AccessTokenValue(); at != "" {
@@ -208,24 +222,21 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
-	} else {
-		req.Header.Set("X-No-User-Id", "1")
 	}
+	// 无 UID 时不发明 X-No-User-Id：官方客户端个人号两个方向都不发 X-No-* 哨兵，
+	// 补一个"我没有 X"的空值反而是伪造指纹（Misaka10091 spec 的实证口径）。
 	// 安全红线：绝不在 chat 请求里携带 X-Refresh-Token。
 	// 企业与域头按 realm 分发：CN 走既有分支（EnterpriseID/Domain 原样透传，缺省 X-No-*）；
 	// global 账号由 injectGlobalChatHeaders 统一覆写为国际客户端形态
 	// （X-No-Enterprise-Id=1 声明无企业 + X-Domain=www.workbuddy.ai 声明国际版域），
 	// 且不回退 X-Domain 到登录会话原值——对齐 intl 项目出站头。
 	if a != nil && !a.IsGlobal() {
+		// 企业号才注入身份头；个人号零注入（同上方 X-No-* 口径）。
 		if a.EnterpriseID != "" {
 			req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
-		} else {
-			req.Header.Set("X-No-Enterprise-Id", "1")
 		}
 		if d := a.DomainValue(); d != "" {
 			req.Header.Set("X-Domain", d)
-		} else {
-			req.Header.Set("X-No-Department-Info", "1")
 		}
 	} else {
 		c.injectGlobalChatHeaders(req, a)
@@ -266,6 +277,41 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
 //     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
 //     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
+//
+// uuidV4 生成 RFC 4122 v4 形态的 UUID（8-4-4-4-12 小写 hex）。
+//
+// 官方 5.9.2 的 applyGatewayHeaders 用 crypto.randomUUID() 生成 X-Conversation-
+// Message-ID 与 X-Request-ID——两者是**各自独立**的两个随机 UUID（带连字符）。
+// 我们此前把 X-Request-ID 设成与 Message-ID 同值、且都是 32 hex 无连字符，
+// 既形态不同、又自证「请求 id 就是消息 id」这一官方不成立的关系。
+//
+// 熵源故障时退化成 32 hex（仍是非空唯一 id），不 panic、不返回空串。
+func uuidV4() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		return session.NewMessageID()
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// acpConnectionID 由会话 id 派生 UUID v4 形态的 acp-connection-id。
+//
+// 官方 5.9.2 桌面端在 ACP 会话建立时用 crypto.randomUUID() 生成一次，随后该会话的
+// 所有 chat 请求复用同一个值（VlmGateway.acquire 的 bySession 表）。这里改用 sha256
+// 确定性派生：同一 conversationID 恒得同值（等价「会话内复用」），会话间互异，
+// 且形态与官方一致（8-4-4-4-12 小写 hex，版本位 4、variant 位 RFC 4122）。
+func acpConnectionID(seed string) string {
+	sum := sha256.Sum256([]byte("wb2a:acp:" + seed))
+	b := sum[:16]
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // variant RFC 4122
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
@@ -273,7 +319,11 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		// 本级补一个 32 hex，调用方（handler）已生成稳定的不走到这里。
 		convReqID = session.NewMessageID()
 	}
-	messageID := session.NewMessageID()
+	messageID := uuidV4()
+	// X-Request-ID 与 Message-ID 是**两个独立的**随机 UUID（官方 applyGatewayHeaders
+	// 各自调一次 randomUUID）。此前这里复用了 messageID，等于向服务端声明
+	// 「请求 id == 消息 id」——官方不存在这种关系，是可判别的形态差异。
+	requestID := uuidV4()
 	// 会话头三元组必须齐全：国际端点收紧通道校验后，缺 X-Conversation-ID 的
 	// 请求会直接 400 / 11128（conversation id missing）。入站没带会话 ID 时
 	// 本级补一个 32 hex（与 X-Conversation-Request-ID 的零值兜底同口径），
@@ -284,9 +334,17 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	}
 	req.Header.Set("X-Conversation-ID", conversationID)
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
+	// acp-connection-id：5.9.2 桌面端把 chat 请求统一走 VlmGateway 转发器，它的
+	// applyGatewayHeaders 无条件设这个头，值来自 acquire() 时按 sessionId 生成的
+	// metadata.acpConnectionId——**同一会话恒同值、会话间不同**。
+	// 这里按 conversationID 派生，天然满足该语义；官方是会话建立时随机生成，
+	// 我们用 sha256 确定性派生，形态（UUID v4）与官方一致。
+	req.Header.Set("acp-connection-id", acpConnectionID(conversationID))
 	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", messageID)
-	req.Header.Set("X-Root-Request-ID", convReqID)
+	req.Header.Set("X-Request-ID", requestID)
+	// 不发 X-Root-Request-ID：官方桌面端主对话的构造里没有它（applyGatewayHeaders
+	// 只设 Conversation-* 三件套与 Request-ID），只有 subagent 才带 rootRequestId。
+	// 网关发出的每条都是主对话请求，带上就是多一个官方不存在的头。
 	traceID := meta.TraceID
 	if traceID == "" {
 		traceID = convReqID
@@ -340,10 +398,21 @@ func (c *Client) injectAttribution(req *http.Request) {
 		return
 	}
 	req.Header.Set("X-Agent-Purpose", "conversation")
+	// X-Agent-Intent/X-Agent-Type 是官方 applyGatewayHeaders 里固定的 agent 语义头
+	// （主对话恒 craft / main，只有 subagent 会变）；X-Private-Data 桌面端恒 true。
+	// 三者此前只在 DesktopChatWithExpert 那条专家路径上有，主 chat 缺——同一条
+	// 链路两条路径的头集合不一致，比单独缺一个头更容易被识别。
+	req.Header.Set("X-Agent-Intent", "craft")
+	req.Header.Set("X-Agent-Type", "main")
+	req.Header.Set("X-Private-Data", "true")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", name)
+	// X-Product 恒为 "SaaS"：官方桌面端就是这么发的（X-IDE-Name/Type 才是 WorkBuddy，
+	// 两者不是同一个语义）。此前这里跟随 name 发 "WorkBuddy"，与同一账号事件上报
+	// 通道（desktop.go 全部 SaaS）自相矛盾——同一客户端两条路径报出两个产品标识，
+	// 是可判别的内部不一致。
+	req.Header.Set("X-Product", "SaaS")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。

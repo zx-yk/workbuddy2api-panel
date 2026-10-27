@@ -126,10 +126,14 @@ func TestCodexInstructionsRewritten(t *testing.T) {
 	if !strings.Contains(out, "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.") {
 		t.Errorf("codex first sentence not rewritten: %q", out)
 	}
-	// 其余两句原样保留，语义不变。
-	if !strings.Contains(out, "Codex CLI is an open source project led by OpenAI.") ||
-		!strings.Contains(out, "You are expected to be precise, safe, and helpful.") {
-		t.Errorf("codex remaining sentences altered: %q", out)
+	// 第二句「Codex CLI is an open source project led by OpenAI」本身就是上游的
+	// system 首行触发 token（可单独出现），现在也一并改写（open source → open-source）；
+	// 第三句不含任何指纹，必须逐字保留。
+	if !strings.Contains(out, "Codex CLI is an open-source project led by OpenAI.") {
+		t.Errorf("codex second sentence should also be rewritten: %q", out)
+	}
+	if !strings.Contains(out, "You are expected to be precise, safe, and helpful.") {
+		t.Errorf("codex third sentence altered: %q", out)
 	}
 }
 
@@ -545,4 +549,78 @@ func TestContainsFoldASCII(t *testing.T) {
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)
+}
+
+// TestSanitizeCodexStandaloneToken Codex 说明句**单独出现**时也要命中。
+//
+// 既有 codexInstructions 常量是「三句连排」的整段，靠第一句的 rewrite 就带过了；
+// 但上游的触发判据是「system 首行含该 token」，单独一句同样会被拦（dddmiku
+// 2026-10-17 实测）。所以这条要能独立生效。
+func TestSanitizeCodexStandaloneToken(t *testing.T) {
+	const alone = "Codex CLI is an open source project led by OpenAI."
+	out := sanitizeText(alone)
+	if strings.Contains(out, "Codex CLI is an open source project led by OpenAI") {
+		t.Fatalf("单独出现的 Codex 说明句未被改写: %q", out)
+	}
+	if !strings.Contains(out, "open-source project led by OpenAI") {
+		t.Fatalf("改写后语义应保留 open-source: %q", out)
+	}
+	if !hasFingerprint(alone) {
+		t.Fatal("预检特征未命中单独出现的 Codex 说明句")
+	}
+}
+
+// TestSanitizeDSHPathSentence 两句路径说明连排时拆断第一句、第二句原样。
+// 2026-10-27 实测：连排 400（渠道校验），单句各自 200。
+func TestSanitizeDSHPathSentence(t *testing.T) {
+	const first = "Tokens prefixed with @ are paths the user explicitly referenced."
+	const second = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	out := sanitizeText(first + "\n" + second)
+
+	if strings.Contains(out, "are paths the user explicitly referenced") {
+		t.Fatalf("连排形态未拆断: %q", out)
+	}
+	if !strings.Contains(out, "are paths that the user explicitly referenced.") {
+		t.Fatalf("第一句未被改写（that 未插入）: %q", out)
+	}
+	if !strings.Contains(out, second) {
+		t.Fatalf("第二句不该被改动: %q", out)
+	}
+	if !hasFingerprint(first + "\n" + second) {
+		t.Fatal("预检特征未命中 DSH 路径句")
+	}
+}
+
+// TestSanitizeDSHPathSecondOnlyUntouched 第二句单独出现不得被改写（避免误伤用户文本）。
+func TestSanitizeDSHPathSecondOnlyUntouched(t *testing.T) {
+	const second = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	if got := sanitizeText(second); got != second {
+		t.Fatalf("第二句单独出现被误改: %q", got)
+	}
+}
+
+// TestSanitizeContentPartsArray 回归 dddmiku 实测：system 为 part 数组时，
+// 任一块首行含触发 token 同样被拦。净化必须走每个 text 块。
+func TestSanitizeContentPartsArray(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "system",
+			"content": []any{
+				map[string]any{"type": "text", "text": "Codex CLI is an open source project led by OpenAI."},
+				map[string]any{"type": "text", "text": "Tokens prefixed with @ are paths the user explicitly referenced."},
+			},
+		},
+	}
+	sanitizeMessages(msgs)
+	raw, _ := json.Marshal(msgs)
+	s := string(raw)
+	if strings.Contains(s, "Codex CLI is an open source project led by OpenAI") {
+		t.Errorf("part 数组里的 Codex 说明句未改写: %s", s)
+	}
+	if strings.Contains(s, "are paths the user explicitly referenced") {
+		t.Errorf("part 数组里的 DSH 路径句未改写: %s", s)
+	}
+	if !strings.Contains(s, "open-source") || !strings.Contains(s, "are paths that") {
+		t.Errorf("改写结果不符合预期: %s", s)
+	}
 }

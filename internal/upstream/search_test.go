@@ -83,12 +83,16 @@ func TestSearchRequestShape(t *testing.T) {
 	if v := got.Get("X-User-Id"); v != "u1" {
 		t.Errorf("X-User-Id=%q want u1", v)
 	}
-	// 会话头族（复用 ChatHeaders）：X-Conversation-Message-ID 与 X-Request-ID 同值。
+	// 会话头族（复用 ChatHeaders）：Message-ID 与 X-Request-ID 是**各自独立的**
+	// 随机 UUID——官方 applyGatewayHeaders 分别调一次 randomUUID，不存在同值关系。
 	if got.Get("X-Conversation-Request-ID") == "" {
 		t.Error("X-Conversation-Request-ID must be set (轮级聚合主键)")
 	}
-	if got.Get("X-Request-ID") == "" || got.Get("X-Conversation-Message-ID") != got.Get("X-Request-ID") {
-		t.Error("X-Conversation-Message-ID 必须与 X-Request-ID 同值")
+	if got.Get("X-Request-ID") == "" || got.Get("X-Conversation-Message-ID") == "" {
+		t.Error("X-Request-ID 与 X-Conversation-Message-ID 都必须非空")
+	}
+	if got.Get("X-Conversation-Message-ID") == got.Get("X-Request-ID") {
+		t.Error("两者应是独立的 UUID，不应同值（同值=官方不存在的关系）")
 	}
 }
 

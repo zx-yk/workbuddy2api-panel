@@ -305,11 +305,15 @@ func TestRefreshSessionDead(t *testing.T) {
 
 func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 	var gotAuth, gotUID, gotProduct string
+	var gotIntent, gotAgentType, gotPrivate string
 	var gotBody []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		gotAuth = r.Header.Get("Authorization")
 		gotUID = r.Header.Get("X-User-Id")
 		gotProduct = r.Header.Get("X-Product")
+		gotIntent = r.Header.Get("X-Agent-Intent")
+		gotAgentType = r.Header.Get("X-Agent-Type")
+		gotPrivate = r.Header.Get("X-Private-Data")
 		gotBody, _ = io.ReadAll(r.Body)
 		return &http.Response{
 			StatusCode: 200,
@@ -326,8 +330,16 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
+	// X-Product 恒 "SaaS"：官方桌面端就是这么发的，X-IDE-Name/Type 才是 WorkBuddy。
+	// 此前跟随 ClientName 发 "WorkBuddy"，与同一账号事件上报通道（恒 SaaS）矛盾。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
+	}
+	// X-Agent-Intent / X-Agent-Type / X-Private-Data：官方 applyGatewayHeaders 固定发送，
+	// 且桌面端 X-Private-Data 恒 true（不分个人/企业）。此前主 chat 路径三个都缺，
+	// 只有专家对话那条路径带了前两个——同一网关两条路径的头集合不一致。
+	if gotIntent != "craft" || gotAgentType != "main" || gotPrivate != "true" {
+		t.Errorf("agent headers: intent=%q type=%q private=%q want craft/main/true", gotIntent, gotAgentType, gotPrivate)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
 		t.Errorf("stream not forced: %s", gotBody)
