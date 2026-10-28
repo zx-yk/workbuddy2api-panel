@@ -187,11 +187,22 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatQueueFullFailsFastWithoutPenalty 上游 429 + code 6021「queue.full.title」
+// TestChatQueueFullRotatesThen429WithoutPenalty 上游 429 + code 6021「queue.full.title」
 // 是渠道级容量满载（推理集群排队打满），**不是账号问题**（2026-10-15 实案：按
 // 限流逐号软冷却，2 秒绞杀整池健康号）。端到端断言：不轮转（只打一次上游）、
 // 直接回 503 + upstream_busy（可重试语义）、账号零惩罚（无冷却/无熔断/无连败）。
-func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
+// TestChatQueueFullRotatesThen429WithoutPenalty 上游 429 + code 6021
+// 「queue.full.title」是渠道级容量/排队信号，**不是账号问题**（2026-10-15 实案：
+// 按限流逐号软冷却，2 秒绞杀整池健康号）——零惩罚不变。2026-10-28 起恢复
+// **请求内轮转**，末端按 429 + Retry-After 透传排队语义：
+//   - 轮转：排队可用性间歇（同一分钟内既有 6021 也有成功），fail-fast 把几秒的
+//     抖动直接交给客户端；
+//   - 429 而非 503：上游本身回 429，SDK 按 Retry-After 自动重试；503 会被部分
+//     客户端当成服务不可用而中断任务。
+//
+// 端到端断言：两号各打一次、429 + upstream_busy + 上游原文在场、Retry-After 兜底
+// 5 秒、账号零惩罚。
+func TestChatQueueFullRotatesThen429WithoutPenalty(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls[authz]++
@@ -206,27 +217,29 @@ func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("code=%d body=%s (want 503: channel-level busy, client should back off and retry)", rec.Code, rec.Body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s (want 429：排队语义原样透传，客户端按 Retry-After 重试)", rec.Code, rec.Body)
 	}
-	if calls["Bearer at-busy1"] != 1 || calls["Bearer at-busy2"] != 0 {
-		t.Errorf("calls=%v want busy1 1 次、busy2 0 次（零轮转）", calls)
+	if calls["Bearer at-busy1"] != 1 || calls["Bearer at-busy2"] != 1 {
+		t.Errorf("calls=%v want 两号各 1 次（请求内轮转，tried 不重复选号）", calls)
 	}
-	// 账号完好：无冷却、无熔断计数、无连败降权。
+	if ra := rec.Header().Get("Retry-After"); ra != "5" {
+		t.Errorf("Retry-After=%q want 5（上游未给 data.retry_after 时的本地兜底）", ra)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "6021") || !strings.Contains(body, "queue.full.title") || !strings.Contains(body, "b1bc87ea") {
+		t.Errorf("429 body 应透传上游原文（code/msg/requestId）: %s", body)
+	}
+	if !strings.Contains(body, "upstream_busy") {
+		t.Errorf("429 body 应带 upstream_busy code: %s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") {
+		t.Errorf("channel-busy 不得报成账号耗尽: %s", body)
+	}
+	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal。
 	st, _ := p.Status("busy1")
 	if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 {
 		t.Errorf("ErrUpstreamBusy must not penalize account: %+v", st)
-	}
-	// 响应体：上游原文透传（requestId 在场）+ upstream_busy code。
-	body := rec.Body.String()
-	if !strings.Contains(body, "6021") || !strings.Contains(body, "queue.full.title") {
-		t.Errorf("503 message should carry upstream 6021 info: %s", body)
-	}
-	if !strings.Contains(body, "upstream_busy") {
-		t.Errorf("503 body should carry upstream_busy code: %s", body)
-	}
-	if strings.Contains(body, "no_healthy_account") {
-		t.Errorf("channel-busy failure must not be reported as account exhaustion: %s", body)
 	}
 }
 
@@ -265,11 +278,11 @@ func TestChatQueueBusyRetryAfterAndSticky(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 				strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-queue"}}`)))
-			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != tc.want {
+			if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != tc.want {
 				t.Fatalf("code=%d Retry-After=%q want %q body=%s", rec.Code, rec.Header().Get("Retry-After"), tc.want, rec.Body)
 			}
 			if calls != 1 {
-				t.Fatalf("calls=%d want fail-fast after one attempt", calls)
+				t.Fatalf("calls=%d want 1（单号池轮换无可换号，末端直接透传）", calls)
 			}
 			if uid, ok := store.lastUID("conv-queue"); !ok || uid != "busy" {
 				t.Fatalf("channel capacity must preserve sticky binding: uid=%q ok=%v", uid, ok)
@@ -1842,13 +1855,20 @@ func TestContentBlockedDoesNotPenalizeAccount(t *testing.T) {
 // 两层各自职责（互不替代）：
 //   - prompt.Rewrite 替换 system/developer 消息（消灭 system 来源指纹）；
 //   - sanitizeMessages 改写 user/assistant 消息中残留的指纹串（兜底用户上下文）。
-func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
-	// 捕获出站 body（prepareBody 已强制 stream + 归一 + 清洗后）。
+//
+// TestCustomModeFingerprintSanitizePerRole custom 端到端：system 被替换成自有提示词；
+// sanitize 只洗**身份域**消息（system / developer / assistant）。user 里的同一句属
+// 用户数据，必须逐字保留（P4：作用域收窄到身份域）；assistant 必须被改写（证明清洗
+// 层仍在工作，不是「全删了」）。
+func TestCustomModeFingerprintSanitizePerRole(t *testing.T) {
+	const ccIdent = "You are Claude Code, Anthropic's official CLI for Claude."
+	const ccBranch = "Main branch (you will usually use this for PRs)"
+	const customSys = "网关自有提示词"
+
 	var sentBody []byte
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			raw := readUpstreamBody(r)
-			sentBody = raw
+			sentBody = readUpstreamBody(r)
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -1859,66 +1879,53 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 	up.SanitizeFingerprints.Store(true) // 开启清洗层（与生产一致）
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	const customSys = "我是网关自有提示词"
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})
 
-	// user 消息含 Claude Code 指纹句（PR39 的 fixture 串，逐字精确指纹）。
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
-		"model":"glm-5.2",
-		"stream":true,
-		"messages":[
-			{"role":"system","content":"You are Claude Code, Anthropic's official CLI for Claude."},
-			{"role":"user","content":"You are Claude Code, Anthropic's official CLI for Claude. Main branch (you will usually use this for PRs)"}
-		]
-	}`))
+	userContent := ccIdent + " " + ccBranch
+	body := `{"model":"glm-5.2","stream":true,"messages":[` +
+		`{"role":"system","content":"` + ccIdent + `"},` +
+		`{"role":"user","content":"` + userContent + `"},` +
+		`{"role":"assistant","content":"` + ccIdent + `"}]}`
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	out := string(sentBody)
-	// 1) system 为自有提示词，旧 system 内容零残留。
 	if !strings.Contains(out, customSys) {
 		t.Errorf("out body should contain custom system prompt: %s", out)
 	}
-	if strings.Contains(out, "official CLI for Claude.") && strings.Contains(out, "You are Claude Code, Anthropic's") {
-		// 旧 system 原文（含句点）不应以 system 角色出现；但 sanitize 把它改写为
-		// "...official CLI tool for Claude."，所以原文 fingerprint 串应消失。
-	}
-	// 原始指纹串（逐字精确匹配）在出站 body 中应被改写：
-	// "official CLI for Claude." → "official CLI tool for Claude."
-	// "Main branch (" → "Default branch ("
-	if strings.Contains(out, "official CLI for Claude.") {
-		t.Errorf("identity fingerprint not rewritten by sanitize in user msg: %s", out)
-	}
-	if strings.Contains(out, "Main branch (you will usually use this for PRs)") {
-		t.Errorf("branch fingerprint not rewritten by sanitize in user msg: %s", out)
-	}
-	// 改写后的痕迹应在（证明 sanitize 层生效，不是"全删了"）。
-	if !strings.Contains(out, "official CLI tool for Claude.") {
-		t.Errorf("sanitized identity rewrite missing: %s", out)
-	}
-	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
-		t.Errorf("sanitized branch rewrite missing: %s", out)
-	}
-	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。
 	var obj map[string]any
 	if err := json.Unmarshal(sentBody, &obj); err != nil {
 		t.Fatalf("out body not json: %v %s", err, out)
 	}
-	msgs := obj["messages"].([]any)
+	msgs, _ := obj["messages"].([]any)
+	var gotSystem, gotUser, gotAssistant string
 	var systemCount int
 	for _, m := range msgs {
-		mm := m.(map[string]any)
-		if mm["role"] == "system" {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		c, _ := mm["content"].(string)
+		switch mm["role"] {
+		case "system":
 			systemCount++
-			if mm["content"] != customSys {
-				t.Errorf("system content=%v want %q", mm["content"], customSys)
-			}
+			gotSystem = c
+		case "user":
+			gotUser = c
+		case "assistant":
+			gotAssistant = c
 		}
 	}
-	if systemCount != 1 {
-		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+	if systemCount != 1 || gotSystem != customSys {
+		t.Errorf("want exactly 1 system = %q, got count=%d content=%q", customSys, systemCount, gotSystem)
+	}
+	if gotUser != userContent {
+		t.Errorf("user data must stay verbatim (identity scope narrowed): got %q want %q", gotUser, userContent)
+	}
+	if gotAssistant == ccIdent {
+		t.Errorf("assistant identity sentence should be sanitized, got unchanged: %q", gotAssistant)
 	}
 }
 

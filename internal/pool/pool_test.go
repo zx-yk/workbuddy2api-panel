@@ -1012,10 +1012,13 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	}
 }
 
-// TestSoftRateModelClearedByPlainCooldown 回归：6004 模型冷却后，若账号又经历一次
-// **非模型级**软冷却（plain Cooldown），softRateModel 必须被清空——否则上次 6004 的
-// 模型豁免会泄漏到本次账号级限流上，导致"换模型请求"错误绕过本次冷却。
-func TestSoftRateModelClearedByPlainCooldown(t *testing.T) {
+// TestAccountCooldownKeepsModelFreeze 账号级冷却与模型级冷冻**正交**（P2）：
+//   - 账号级冷却期间整号不可选（换模型也不行）——这层安全性由 healthyForModel
+//     末尾的 e.healthy(now) 保证，不依赖「顺手清掉模型冷却」；
+//   - 账号级冷却到期后，(账号, 模型) 的 6004 冷冻仍在——不会被「账号在别的模型上
+//     吃一次 429」抹掉，否则解冻后立刻再撞同一模型的限流墙（多号池里的典型表现：
+//     提示 15:22 恢复，2h 后又撞一次 6004）。
+func TestAccountCooldownKeepsModelFreeze(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -1024,18 +1027,24 @@ func TestSoftRateModelClearedByPlainCooldown(t *testing.T) {
 	p.SetCredits("u2", 1, 0)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 
-	// 1) 6004 带解析时间 → 记录模型 glm-5.3。
+	// 1) 6004 带上游重置时间 → 只锁 (u1, glm-5.3)，其他模型仍可选到 u1。
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u1" {
-		t.Fatalf("precondition: different-model should bypass, got %+v", got)
+		t.Fatalf("precondition: 其他模型应可选到 u1, got %+v", got)
 	}
-	// 2) 账号恢复后经历普通账号级软冷却（无模型语义）。
-	p.NoteSuccess("u1") // 还原 fresh 状态（Cooldown 会重设 until）
+	// 2) u1 再吃一次账号级软冷却：期间整号不可选（换模型也不行）。
 	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
-	// 3) 换模型请求不得再豁免（softRateModel 已清空）。
-	got := p.PickExcludingForModel(nil, "hy3-x")
-	if got == nil || got.UID != "u2" {
-		t.Fatalf("plain cooldown must clear softRateModel (no bypass), got %+v", got)
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u2" {
+		t.Fatalf("账号级冷却期间换模型也不得选到 u1, got %+v", got)
+	}
+	// 3) 账号级冷却到期（负时长把 until 推到过去）：模型冷冻必须仍在。
+	p.Cooldown("u1", CoolSoft, -time.Second, "expired sweep")
+	if got := p.PickExcludingForModel(nil, "glm-5.3"); got == nil || got.UID != "u2" {
+		t.Fatalf("6004 模型冷冻被账号级冷却清掉了（解冻后会立刻再撞同一模型）, got %+v", got)
+	}
+	// 4) 其他模型照常可选：冷冻的只有 glm-5.3，不外溢成整号冷却。
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u1" {
+		t.Fatalf("模型冷冻不得外溢成整号冷却, got %+v", got)
 	}
 }
 

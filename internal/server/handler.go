@@ -875,8 +875,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	timeoutRotateExtra := h.cfg.TimeoutRotateExtra
 	// stickyOverflow 表示本次只是从满载的绑定号临时溢出；成功后不改绑。
 	stickyOverflow := false
-	// preserveCapacityBinding 表示绑定号曾命中 14003 容量短窗口；本轮即使用
-	// 其他账号临时代理成功，也保留原会话绑定，待短窗口后回到原账号。
+	// preserveCapacityBinding 表示绑定号曾命中 14003 容量短窗口或 6020/6021 渠道
+	// 排队（都只说明「此刻容量不够」，账号本身健康）；本轮即使用其他账号临时代理
+	// 成功，也保留原会话绑定，待窗口过去后回到原账号。
 	preserveCapacityBinding := false
 	// 429 软限流不消耗轮换预算（见下方 ErrSoftRate 的 i-- 豁免）：
 	//   - attempt 是真实尝试次数，只用于 rotateBackoff 的退避阶梯——豁免掉的
@@ -1172,32 +1173,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			// 6020/6021 渠道级容量满载：**不罚号不轮转**，立即透传
-			// 上游原文回客户端（503 + upstream_busy）。上游集群排队打满时换任何
-			// 账号都撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号
-			// （2026-10-15 实案），且换号白撞把无效请求放大 MaxRotate 倍。客户端
-			// 按 SDK 退避重试即可；等待窗口过去渠道恢复即成功。
+			// 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/满载：
+			// **零惩罚不变**（不冷却/不熔断/不喂连败——按限流处置会逐号软冷却，实测
+			// 2 秒绞杀整池健康号，2026-10-15 实案），但恢复**请求内轮转**，末端按
+			// 429 + Retry-After 透传排队语义（见末端 ErrUpstreamBusy 分支）。
+			//
+			// 为什么轮转回来了：排队可用性是**间歇的**——2026-10-28 生产实案同一分钟
+			// 内既有 6021 也有成功、几分钟后同号即恢复；一次性 fail-fast 把几秒的抖动
+			// 直接交给客户端。队列按账号类型全局共享，换号绕不过排队本身，轮转的价值
+			// 不在「绕过」而在空窗不再逐请求致命，代价是 MaxRotate 次上游调用。
+			//
+			// 为什么末端回 429 而不是 503：上游对这两个形态本身回的就是 429（6020 还
+			// 带 data.retry_after=40），网关改写 503 等于把「稍后再试」翻译成「服务
+			// 不可用」——按 SDK 语义 429 带 Retry-After 会自动睡后重发，503 有客户端
+			// 直接中断任务（2026-10-28 实案）。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				// 渠道繁忙不是账号失效：只释放本次租约，保留已有会话绑定。
+				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+				// 排队/满载与账号无关：只释放本次租约、保留会话绑定；绑定号撞上时
+				// 本轮即使用别的号代理成功也不改绑（排队是全局的，下轮仍走原号）。
+				if stickyUID != "" && acct.UID == stickyUID {
+					preserveCapacityBinding = true
+				}
 				releaseHeld()
-				retryAfter := upstream.QueueRetryAfter(string(respBody))
-				if uerr.RetryAfter > 0 {
-					retryAfter = uerr.RetryAfter // 响应头优先于 body
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（排队满载换号退避）
 				}
-				if retryAfter <= 0 {
-					retryAfter = 5 * time.Second
-				}
-				w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					msg = "upstream capacity is full; retry after a short wait"
-				}
-				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_busy", msg,
-					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusServiceUnavailable
-				st.outcome = reqlog.OutcomeHTTPError
-				return
+				continue
 			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
@@ -1488,11 +1490,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
 		case upstream.ErrUpstreamBusy:
-			// 6020/6021 渠道级容量满载（防御路径：正常已在轮转循环内
-			// fail-fast 拦截）。503 + 可重试语义——上游原文（下方统一透传）
-			// 含 requestId，客户端按 SDK 退避重试即可。
+			// 6020/6021 渠道级排队/满载（轮转已耗尽：本请求每个号都撞同一堵墙）。
+			// 回 429 + Retry-After 而不是 503——上游对这两个形态本身回的就是 429
+			// （6020 带 data.retry_after），透传原状态让下游按 OpenAI 限流语义自助
+			// 重试；上游原文（requestId / queue_position）仍在 message 原样透传
+			// （下方统一覆盖），供客户端日志定位。
+			status = http.StatusTooManyRequests
 			code = "upstream_busy"
-			msg = "upstream capacity is full; retry after a short wait"
+			msg = "upstream queue is full; retry after a short wait"
 		case upstream.ErrModelBusy:
 			// 14003 是暂时性容量窗口。若全池仅剩该模型的容量冷却，下方
 			// modelBlock 分支补充最早恢复时间；混合其他模型冷却时仍按保守的
@@ -1582,6 +1587,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if retryAfter <= 0 {
 			retryAfter = 5 * time.Second
+		}
+		if retryAfter > maxRetryAfter {
+			// 排队口径是「预计等到什么时候」，脏值/时钟漂移可能把天文数字带进来；
+			// 封顶避免客户端被一条头静默挂起半小时以上。
+			retryAfter = maxRetryAfter
 		}
 		w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
 	default:
@@ -1716,6 +1726,11 @@ func isConnectError(err error) bool {
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "tls handshake timeout")
 }
+
+// maxRetryAfter Retry-After 头的本地上限：容量/排队类错误的等待口径是上游
+// 「预计如此」，脏值或时钟漂移会把天文数字带进头里；给客户端一个上界，避免
+// 一条头把请求静默挂起很久。与上游 6020 的 retry_after=40 量级不冲突。
+const maxRetryAfter = 10 * time.Minute
 
 // retryAfterHeader 把等待时长编码为 Retry-After 整数秒：亚秒向上取整，正等待
 // 最少返回 1，避免客户端把 500ms 理解成立即重试。
@@ -1859,10 +1874,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （不冷却/不熔断/不 NoteError/不喂连败），chatCompletions 已 fail-fast
 		// 400 透传上游原文并终止轮转。
 	case upstream.ErrUpstreamBusy:
-		// 6020/6021 渠道级容量满载：账号余额健康、未限流、session 未死，
+		// 6020/6021 渠道级排队/满载：账号余额健康、未限流、session 未死，
 		// 换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError/不喂连败，同
-		// ErrContentBlocked 待遇）；chatCompletions 已 fail-fast 503 透传原文、
-		// 终止轮转——该分支只为文档完备。
+		// ErrContentBlocked 待遇）；chatCompletions 会换号重试（排队可用性间歇），
+		// 轮转耗尽后走末端 ErrUpstreamBusy 分支回 429 + Retry-After。
+		// 一旦按 ErrSoftRate 罚号，会与全冷却兜底互相喂成整池停摆（2026-10-15 实案）。
 	case upstream.ErrModelBusy:
 		// 14003 只避让当前 (账号,模型) 的短容量窗口，不做账号级软冷却、
 		// 不喂熔断或连败。已有粘性由调用方保留；新会话由普通选号严格避开。

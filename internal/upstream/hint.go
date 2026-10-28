@@ -69,9 +69,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrUpstreamBusy:
-		// 6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
-		// 指引客户端等待后重试（SDK 指数退避天然适配）。
-		return "upstream capacity is full (queue.full); this is a channel-level issue, not an account problem; retry after a short wait"
+		// 6020 queue.waiting / 6021 queue.full：渠道级排队/容量满载。措辞明确
+		// 「不是账号问题」，并说明网关已轮转过所有账号（继续换号无意义），
+		// 指引客户端按 Retry-After 等待后重试（SDK 指数退避天然适配）。
+		return "upstream queue is full (6020/6021); this is a channel-level issue, not an account problem; every account was already tried, so retry after the Retry-After delay"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:

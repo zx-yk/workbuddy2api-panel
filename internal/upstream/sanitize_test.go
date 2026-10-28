@@ -194,7 +194,7 @@ func TestMultimodalTextPartOnly(t *testing.T) {
 		map[string]any{"type": "text", "text": ccIdentity},
 		imgPart,
 	}
-	out, changed := sanitizeContent(content)
+	out, changed := sanitizeContent(content, true)
 	if !changed {
 		t.Fatal("expected change")
 	}
@@ -397,16 +397,16 @@ const (
 
 func TestIdentitySentenceRewritten(t *testing.T) {
 	cases := map[string]string{
-		"You are an AI agent powered by DeepSeek Harness.":                                    "You are a helpful AI assistant.",
-		"You are an AI assistant built on DeepSeek. Use tools wisely.":                        "You are a helpful AI assistant. Use tools wisely.",
-		"You are Codex Agent, built by OpenAI.":                                               "You are a helpful AI assistant.",
-		"You are an assistant created by Example. Next.":                                      "You are a helpful AI assistant. Next.",
-		"You are a model developed by Example.":                                               "You are a helpful AI assistant.",
-		"You are the AI made by Example.":                                                     "You are a helpful AI assistant.",
-		"you are an llm TRAINED BY someone.":                                                  "You are a helpful AI assistant.",
-		"You are powered by the model named Claude Opus 4.5. The exact model ID is x-4-5.":    "You are a helpful AI assistant. The exact model ID is x-4-5.",
-		"Intro.\nYou are a coding agent powered by the deepseek-v4.1-flash model.\nTools: a.": "Intro.\nYou are a helpful AI assistant.\nTools: a.",
-		"You are an AI agent powered by DeepSeek Harness\nnext line":                          "You are a helpful AI assistant.\nnext line",
+		"You are an AI agent powered by DeepSeek Harness.":                                    "You are a helpful assistant.",
+		"You are an AI assistant built on DeepSeek. Use tools wisely.":                        "You are a helpful assistant. Use tools wisely.",
+		"You are Codex Agent, built by OpenAI.":                                               "You are a helpful assistant.",
+		"You are an assistant created by Example. Next.":                                      "You are a helpful assistant. Next.",
+		"You are a model developed by Example.":                                               "You are a helpful assistant.",
+		"You are the AI made by Example.":                                                     "You are a helpful assistant.",
+		"you are an llm TRAINED BY someone.":                                                  "You are a helpful assistant.",
+		"You are powered by the model named Claude Opus 4.5. The exact model ID is x-4-5.":    "You are a helpful assistant. The exact model ID is x-4-5.",
+		"Intro.\nYou are a coding agent powered by the deepseek-v4.1-flash model.\nTools: a.": "Intro.\nYou are a helpful assistant.\nTools: a.",
+		"You are an AI agent powered by DeepSeek Harness\nnext line":                          "You are a helpful assistant.\nnext line",
 	}
 	for in, want := range cases {
 		if got := sanitizeText(in); got != want {
@@ -479,21 +479,64 @@ func TestChannelFingerprintRewriteIdempotent(t *testing.T) {
 	}
 }
 
-func TestChannelFingerprintScrubbedInEveryRole(t *testing.T) {
-	ms := []any{
-		map[string]any{"role": "system", "content": "You are an AI agent powered by DeepSeek Harness."},
-		map[string]any{"role": "user", "content": dshGUIA + " " + dshGUIB},
-		map[string]any{"role": "assistant", "content": "You are a coding agent powered by the deepseek-v4.1-flash model."},
-		map[string]any{"role": "tool", "content": "Sisyphus-Junior - Focused executor from OhMyOpenCode"},
+// TestChannelFingerprintScrubbedPerRoleScope 身份域指纹的净化作用域：system /
+// developer / assistant 承载「客户端是谁」的指纹，必须洗掉；user / tool 里出现
+// 同样的句子属**用户数据**（用户粘贴的 prompt、工具读到的文件内容），除反探测串
+// 外必须逐字不动——改写等于篡改用户输入。
+func TestChannelFingerprintScrubbedPerRoleScope(t *testing.T) {
+	orig := []string{
+		"You are an AI agent powered by DeepSeek Harness.",
+		dshGUIA + " " + dshGUIB,
+		"You are the AI made by Example.",
+		dshGUIA,
+	}
+	roles := []string{"system", "user", "assistant", "tool"}
+	ms := make([]any, 0, len(orig))
+	for k, role := range roles {
+		ms = append(ms, map[string]any{"role": role, "content": orig[k]})
 	}
 	if !sanitizeMessages(ms) {
-		t.Fatal("expected change")
+		t.Fatal("expected identity-domain messages to change")
 	}
-	for i, m := range ms {
-		c := m.(map[string]any)["content"].(string)
-		if containsFoldASCII(c, "harness") || strings.Contains(c, "powered by") || strings.Contains(c, "OhMyOpenCode") {
-			t.Errorf("message %d still carries fingerprint: %q", i, c)
+	for k, m := range ms {
+		got := m.(map[string]any)["content"].(string)
+		if sanitizeIdentityRole(roles[k]) {
+			if got == orig[k] {
+				t.Errorf("role=%s identity fingerprint not scrubbed: %q", roles[k], got)
+			}
+			continue
 		}
+		if got != orig[k] {
+			t.Errorf("role=%s user data rewritten (must stay verbatim): %q -> %q", roles[k], orig[k], got)
+		}
+	}
+}
+
+// TestAntiProbeScrubbedInEveryRole 反探测串与身份域无关：裸 11128 出现在任何角色
+// 的消息里都是上游整单拦截条件（用户粘贴报错、工具回显错误码），必须照洗。
+func TestAntiProbeScrubbedInEveryRole(t *testing.T) {
+	const probe = "11" + "128"
+	in := "upstream said " + probe + " again"
+	for _, role := range []string{"system", "developer", "assistant", "user", "tool"} {
+		ms := []any{map[string]any{"role": role, "content": in}}
+		if !sanitizeMessages(ms) {
+			t.Fatalf("role=%s: expected anti-probe rewrite", role)
+		}
+		got := ms[0].(map[string]any)["content"].(string)
+		if strings.Contains(got, probe) {
+			t.Errorf("role=%s still carries bare anti-probe token: %q", role, got)
+		}
+	}
+}
+
+// TestIdentityReplacementIsNotBlockedOpening P3：改写串自身不能落在上游「禁用开头」
+// 名单里（名单第一条就是带 AI 的那句）。洗成另一句可疑开头等于没洗。
+func TestIdentityReplacementIsNotBlockedOpening(t *testing.T) {
+	if sanitizeIdentityReplacement != "You are a helpful "+"assistant." {
+		t.Fatalf("replacement=%q", sanitizeIdentityReplacement)
+	}
+	if strings.Contains(strings.ToLower(sanitizeIdentityReplacement), " ai ") {
+		t.Errorf("replacement still contains AI token: %q", sanitizeIdentityReplacement)
 	}
 }
 

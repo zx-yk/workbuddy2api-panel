@@ -194,9 +194,13 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
-		// 非模型级冷却入口：清空会参与路由的模型级冷却，避免上一次
-		// 模型豁免泄漏到账号级冷却上；AuditOnly 条目不影响路由，保留展示。
-		clearRoutingModelCooldownsLocked(e)
+		// 不清 modelCooldowns：账号级冷却与模型级冷冻是**正交**维度。
+		//   - 账号级冷却期间 healthyForModel 末尾的 e.healthy(now) 已保证整号不可选，
+		//     modelExempt 也显式判了 !e.until.IsZero() → 不存在「模型豁免泄漏」，
+		//     当初加清空的理由已不成立；
+		//   - 反之清掉会让「锁到上游重置墙钟」的承诺提前失效：账号在别的模型上吃一次
+		//     429，本模型的 6004/6000 冷冻就被一起抹掉，账号级冷却到期后立刻再撞同一
+		//     模型的限流墙（多号池里表现为「提示 15:22 恢复，2h 后又撞一次」）。
 		p.dirty.Store(true)
 	}
 }
@@ -238,7 +242,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			}
 			e.coolKind = CoolSoft
 			e.reason = reason
-			clearRoutingModelCooldownsLocked(e)
+			// 与 Cooldown 同口径：账号级冷却不清模型级冷冻（正交维度）。
 		}
 		p.dirty.Store(true)
 	}
@@ -325,19 +329,6 @@ func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 		AuditOnly: true,
 	}
 	p.dirty.Store(true)
-}
-
-// clearRoutingModelCooldownsLocked 删除参与选号豁免的模型冷却，保留 AuditOnly 台账。
-// 调用方必须已持有 p.mu 写锁。
-func clearRoutingModelCooldownsLocked(e *entry) {
-	for model, mc := range e.modelCooldowns {
-		if !mc.AuditOnly {
-			delete(e.modelCooldowns, model)
-		}
-	}
-	if len(e.modelCooldowns) == 0 {
-		e.modelCooldowns = nil
-	}
 }
 
 // modelBlock TTL 常量（11102 负缓存退避）：
@@ -532,7 +523,7 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		}
 		e.coolKind = CoolSoft
 		e.reason = reason
-		clearRoutingModelCooldownsLocked(e) // 账号级软冷却：清路由豁免，保留审计台账
+		// 与 Cooldown 同口径：账号级软冷却不清模型级冷冻（正交维度）。
 		p.dirty.Store(true)
 	}
 }
