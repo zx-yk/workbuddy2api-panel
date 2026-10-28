@@ -37,12 +37,57 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.1-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.2-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.2 · 2026-10-28
+
+**本版第一次做到「头名集合与官方完全一致」。** 前几版的差异判断都是读代码推的，本版改成
+**直接抓官方客户端自己发出的请求**：把官方内置 CLI 的 `CODEBUDDY_BASE_URL` 指向本地假上游，
+跑一次 `-p` 就能拿到它真实发出的 41 个头——不消耗额度、不触碰上游。据此逐项对齐后，
+业务头 35 : 35，官方有我们没有 0 个、我们有官方没有 0 个。
+
+**按抓包修正**
+- **删除 `acp-connection-id`**。v1.16.0 加它是照 `app.asar` 的 `applyGatewayHeaders`（UI→CLI 的
+  ACP 元数据层）；官方 chat 里没有这个头，CLI 源码里该名字的 30 处引用全在本地 ACP 控制面
+  （服务端校验、CORS 白名单、`/api/v1/acp` 客户端），没有一处加到上游请求。
+- **`X-Agent-Runtime` 改 `other`**。v1.16.1 写的 `local-agent` 是照常量枚举猜的
+  （`AGENT_RUNTIMES=[local-agent,cloud-agent,agent-agent]` 是枚举全集，实际取值由运行时判定），
+  抓包实测桌面端内置 CLI 落到 `other`。
+- **`User-Agent` 的 `CLI/<ver>` 段改 `2.165.0`**（原 2.137.1 是旧值）。
+- **补 7 个 `x-stainless-*`**：官方模型客户端是 stainless 生成的 JS SDK，每次 chat 都带
+  `arch=x64` / `lang=js` / `os=Windows` / `package-version=6.25.0` / `retry-count=0` /
+  `runtime=node` / `runtime-version=v22.22.2`。它们描述的是**客户端**环境，与 UA 自称的
+  WorkBuddy 桌面端自洽；缺了就是「自称桌面包却没有任何 SDK 痕迹」。
+- **链路族重做成一个自洽的 OTEL trace**：`traceparent` / `b3` / `X-Trace-ID` / `X-B3-TraceId`
+  共用同一个 trace id（随会话稳定），`X-B3-SpanId` 每请求新且与消息 id 解耦，补上
+  `X-B3-ParentSpanId`（会话根 span）。此前把 `conversationRequestID` 直接当 trace id、SpanId 取
+  `messageID[:16]`、且没有 traceparent/b3/ParentSpanId——「有 B3 的碎片但没有 trace 上下文」。
+- **补 `baggage`**：`codebuddy.session_id=<会话 id>,codebuddy.conversation_request_id=<轮级 id>`。
+- **`X-Conversation-ID` 发头时排成 UUID 形态**：内部派生键是 `d-<32hex>`（34 字符，不是 UUID），
+  官方是带连字符的 UUID；只在发头时排一次，内部键不动（会话绑定仍按原键）。
+
+**验证**
+- 头集合自动比对：官方 CLI 抓包 vs 本实现 mock dump → 35 : 35，缺 0、多 0；23 个值完全相同，
+  12 个差异全是每请求随机的 ID
+- 真实上游：非流式 / 流式 / 带 Claude Code 风格 system 首行的请求均正常；长请求走 gzip
+  正常返回；`/v1/messages` 非流式与流式均正常
+- `go test ./...` 18 包全绿、`go vet` 干净、`-race` 通过
+
+**仍不一致、但不改的四处**（都有依据，不是遗漏）
+- **ID 的具体值**：每请求随机，本就不该一致
+- **头名大小写**：Go 的 `http.Header.Set` 会规范化（`X-Conversation-ID` → `X-Conversation-Id`、
+  `b3` → `B3`），官方 Node 保留原样。实测两种写法响应完全一致 → 上游不区分。不值得为它
+  绕过 stdlib（会破坏 `Header.Get` 与既有测试）
+- **`Accept-Encoding`**：本实现 `gzip`（Go transport 自动加且自动解压），官方
+  `gzip, compress, deflate, br`。手动改会让 Go 不再自动解压，需自行处理 br/deflate，风险大于收益
+- **请求体结构**：官方是 agent（77KB 系统提示 + `tools` + `extra_vars` + `reasoning_effort` +
+  `verbosity`），本实现是中继（转发调用方 body，另加 `prompt_cache_key`）——设计使然，
+  伪造 agent 运行时字段反而是错的方向
 
 ### v1.16.1 · 2026-10-28
 
@@ -452,7 +497,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.1` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.2` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -464,17 +509,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.1-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.1-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.1-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.1-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.1-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.2-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.2-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.2-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.2-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.2-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.1
+V=1.16.2
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

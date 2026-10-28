@@ -494,7 +494,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Request-ID", msgID)
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
-	h.Set("X-Agent-Runtime", "local-agent")
+	h.Set("X-Agent-Runtime", "other")
 	// X-Private-Data = "false"：模型优化默认开启（product.json 的
 	// DefaultModelOptimizationOff=false），CLI 此时发 false。原发 true 方向反了。
 	h.Set("X-Private-Data", "false")

@@ -162,7 +162,7 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 const (
 	defaultUAString      = "WorkBuddy/" + defaultClientVersion + " WorkBuddy/" + defaultClientVersion + " CLI/" + defaultCliVersion
 	explicitString       = "MyCustomAgent/3.1"
-	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.137.1"
+	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/" + defaultCliVersion
 	billingUAWorkBuddy   = "WorkBuddy/" + defaultClientVersion
 	billingUACustomVer   = "WorkBuddy/6.0.0"
 	billingUAAgentString = "BillingAgent/1"

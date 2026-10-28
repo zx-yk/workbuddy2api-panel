@@ -3,6 +3,7 @@ package upstream
 import (
 	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -70,51 +71,126 @@ func testAuth() *auth.Auth {
 	return &auth.Auth{UID: "u1", AccessToken: "at"}
 }
 
-// acpUUIDRe UUID v4 形态（8-4-4-4-12 小写 hex，版本位 4，variant RFC 4122）。
-var acpUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+// uuidShapeRe UUID 形态（8-4-4-4-12 小写 hex，不校验版本位）。
+var uuidShapeRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// TestACPConnectionIDShapeAndStability acp-connection-id 必须是 UUID v4 形态，
-// 且「同一会话恒同值、不同会话不同值」——对齐官方 5.9.2 VlmGateway.acquire 里
-// 按 sessionId 生成一次并复用的语义。
-func TestACPConnectionIDShapeAndStability(t *testing.T) {
-	a1 := acpConnectionID("conv-alpha")
-	a2 := acpConnectionID("conv-alpha")
-	b := acpConnectionID("conv-beta")
-
-	for _, s := range []string{a1, a2, b} {
-		if !acpUUIDRe.MatchString(s) {
-			t.Errorf("%q 不是 UUID v4 形态", s)
-		}
-	}
-	if a1 != a2 {
-		t.Errorf("同一会话应恒同值：%q vs %q", a1, a2)
-	}
-	if a1 == b {
-		t.Errorf("不同会话应不同值，实际都是 %q", a1)
+// TestChatHeadersNoACPConnectionID acp-connection-id 不该出现在 chat 请求里。
+//
+// 2026-10-28 抓官方 CLI 2.165.0 实测：chat 40/41 个头里**没有**它；CLI 源码里这个
+// 名字的 30 处引用全在本地 ACP 控制面（服务端校验 / CORS 白名单 / /api/v1/acp 客户端），
+// 没有一处加到上游请求。v1.16.0 按 app.asar 的 ACP 层加进来是错层。
+func TestChatHeadersNoACPConnectionID(t *testing.T) {
+	c := &Client{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+	c.ChatHeaders(req, testAuth(), "", ChatMeta{ConversationID: "d-0123456789abcdef0123456789abcdef"})
+	if v := req.Header.Get("acp-connection-id"); v != "" {
+		t.Errorf("chat 请求不该带 acp-connection-id，实际 %q", v)
 	}
 }
 
-// TestChatHeadersCarryACPConnectionID chat 发出的请求必须带 acp-connection-id，
-// 且同一 meta.ConversationID 下两次构造得到同一个值。
-func TestChatHeadersCarryACPConnectionID(t *testing.T) {
+// TestChatHeadersTraceFamilyCoherent 链路族必须是一个自洽的 OTEL trace：
+// traceparent 的 trace-id == b3 首段 == X-Trace-ID == X-B3-TraceId；span id 每请求新、
+// 与 message id 无关；parent span 随会话稳定。
+func TestChatHeadersTraceFamilyCoherent(t *testing.T) {
 	c := &Client{}
-	a := &auth.Auth{UID: "u1", AccessToken: "at", Domain: "www.codebuddy.cn"}
-	meta := ChatMeta{ConversationID: "conv-xyz", ConversationRequestID: "0123456789abcdef0123456789abcdef"}
+	meta := ChatMeta{ConversationID: "d-0123456789abcdef0123456789abcdef",
+		ConversationRequestID: "fedcba9876543210fedcba9876543210"}
 
-	get := func() string {
-		// 每次新建 req（头容器不能复用），但 meta 相同。
-		req, _ := http.NewRequest("POST", "https://example.com/v2/chat/completions", nil)
-		c.ChatHeaders(req, a, "", meta)
-		return req.Header.Get("acp-connection-id")
+	get := func() http.Header {
+		req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+		c.ChatHeaders(req, testAuth(), "", meta)
+		return req.Header
 	}
-	first, second := get(), get()
-	if first == "" {
-		t.Fatal("chat 请求缺 acp-connection-id")
+	h1, h2 := get(), get()
+
+	trace := h1.Get("X-B3-TraceId")
+	if len(trace) != 32 {
+		t.Fatalf("X-B3-TraceId=%q 应为 32 hex", trace)
 	}
-	if first != second {
-		t.Errorf("同一会话两次构造应同值：%q vs %q", first, second)
+	if h1.Get("X-Trace-ID") != trace {
+		t.Errorf("X-Trace-ID=%q 应等于 X-B3-TraceId=%q", h1.Get("X-Trace-ID"), trace)
 	}
-	if !acpUUIDRe.MatchString(first) {
-		t.Errorf("%q 不是 UUID v4 形态", first)
+	tp := h1.Get("traceparent")
+	if want := "00-" + trace + "-"; !strings.HasPrefix(tp, want) || !strings.HasSuffix(tp, "-01") {
+		t.Errorf("traceparent=%q 与 trace id %q 不自洽", tp, trace)
+	}
+	b3 := h1.Get("b3")
+	if !strings.HasPrefix(b3, trace+"-") || !strings.HasSuffix(b3, "-1-"+h1.Get("X-B3-ParentSpanId")) {
+		t.Errorf("b3=%q 与 trace/parent 不自洽", b3)
+	}
+	span1 := h1.Get("X-B3-SpanId")
+	if len(span1) != 16 {
+		t.Errorf("SpanId=%q 应为 16 hex", span1)
+	}
+	if span1 != h2.Get("X-B3-SpanId") {
+		// 期望每请求新 span；不等即正确
+	} else if span1 != "" {
+		t.Errorf("SpanId 每请求应不同，两次都是 %q", span1)
+	}
+	if h1.Get("X-B3-ParentSpanId") != h2.Get("X-B3-ParentSpanId") {
+		t.Error("同一会话的 parent span 应稳定")
+	}
+	if h1.Get("X-B3-Sampled") != "1" {
+		t.Errorf("X-B3-Sampled=%q want 1", h1.Get("X-B3-Sampled"))
+	}
+	// span 与消息 id 无关（此前 SpanId 直接取 messageID[:16]）
+	if span1 == h1.Get("X-Conversation-Message-ID")[:16] {
+		t.Error("SpanId 不该等于 message id 前 16 位")
+	}
+}
+
+// TestChatHeadersBaggage 官方把会话 id 与轮级请求 id 作为 W3C baggage 双发。
+func TestChatHeadersBaggage(t *testing.T) {
+	c := &Client{}
+	const convReq = "fedcba9876543210fedcba9876543210"
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+	c.ChatHeaders(req, testAuth(), "", ChatMeta{
+		ConversationID:        "d-0123456789abcdef0123456789abcdef",
+		ConversationRequestID: convReq,
+	})
+	want := "codebuddy.session_id=01234567-89ab-cdef-0123-456789abcdef,codebuddy.conversation_request_id=" + convReq
+	if got := req.Header.Get("baggage"); got != want {
+		t.Errorf("baggage=%q\n want %q", got, want)
+	}
+}
+
+// TestChatHeadersSDKStamp 官方 js SDK 的 7 个 x-stainless-* 头必须齐全且取值固定
+// （2026-10-28 抓包实测值）。
+func TestChatHeadersSDKStamp(t *testing.T) {
+	c := &Client{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+	c.ChatHeaders(req, testAuth(), "", ChatMeta{})
+	want := map[string]string{
+		"x-stainless-arch":            "x64",
+		"x-stainless-lang":            "js",
+		"x-stainless-os":              "Windows",
+		"x-stainless-package-version": "6.25.0",
+		"x-stainless-retry-count":     "0",
+		"x-stainless-runtime":         "node",
+		"x-stainless-runtime-version": "v22.22.2",
+	}
+	for k, v := range want {
+		if got := req.Header.Get(k); got != v {
+			t.Errorf("%s=%q want %q", k, got, v)
+		}
+	}
+}
+
+// TestConversationHeaderIDShape 内部派生键 d-<32hex> 发头时排成 UUID 形态；
+// 客户端透传的原值不改。
+func TestConversationHeaderIDShape(t *testing.T) {
+	if got := conversationHeaderID("d-0123456789abcdef0123456789abcdef"); got != "01234567-89ab-cdef-0123-456789abcdef" {
+		t.Errorf("派生键应转 UUID 形态，得到 %q", got)
+	}
+	for _, raw := range []string{"01a18013-46ce-7483-bddd-2e90d2c24a59", "0123456789abcdef0123456789abcdef"} {
+		if got := conversationHeaderID(raw); got != raw {
+			t.Errorf("透传值不该被改：%q → %q", raw, got)
+		}
+	}
+	c := &Client{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+	c.ChatHeaders(req, testAuth(), "", ChatMeta{ConversationID: "d-0123456789abcdef0123456789abcdef"})
+	if got := req.Header.Get("X-Conversation-ID"); !uuidShapeRe.MatchString(got) {
+		t.Errorf("X-Conversation-ID=%q 应为 UUID 形态", got)
 	}
 }

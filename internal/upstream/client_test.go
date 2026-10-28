@@ -338,12 +338,12 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	// agent 语义头，取值按 CLI 内核：
-	//   X-Agent-Intent=craft、X-Agent-Type=main、X-Agent-Runtime=local-agent（桌面端本地 agent）
+	//   X-Agent-Intent=craft、X-Agent-Type=main、X-Agent-Runtime=other（抓官方 CLI 2.165.0 实测值）
 	//   X-Private-Data=**false**——CLI 里是 `A ? "false" : "true"`，A 为「模型优化已启用」，
 	//   product.json 的 DefaultModelOptimizationOff=false → 优化开启 → false。
 	//   原先按「桌面端恒 true」写反了方向。
-	if gotIntent != "craft" || gotAgentType != "main" || gotRuntime != "local-agent" {
-		t.Errorf("agent headers: intent=%q type=%q runtime=%q want craft/main/local-agent", gotIntent, gotAgentType, gotRuntime)
+	if gotIntent != "craft" || gotAgentType != "main" || gotRuntime != "other" {
+		t.Errorf("agent headers: intent=%q type=%q runtime=%q want craft/main/other", gotIntent, gotAgentType, gotRuntime)
 	}
 	if gotPrivate != "false" {
 		t.Errorf("X-Private-Data=%q want false（模型优化默认开启时 CLI 发 false）", gotPrivate)

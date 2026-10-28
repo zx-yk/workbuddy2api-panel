@@ -17,9 +17,10 @@ const (
 	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.9.3）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
 	defaultClientVersion = "5.9.3"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方桌面端内置 CLI（2.165.0，
+	// 2026-10-28 抓包实测 UA 尾部即 `CLI/2.165.0`；此前写的 2.137.1 是旧值）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.137.1"
+	defaultCliVersion = "2.165.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -246,7 +247,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectClientIP(req, clientIP)
 	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入。
 	c.injectDeviceToken(req, a)
-	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
+	// SDK 痕迹头（x-stainless-*）：官方模型客户端是 stainless 生成的 JS SDK，每次
+	// chat 都带。见 injectSDKHeaders 注释。
+	c.injectSDKHeaders(req)
+	// 会话头族（对话/请求/消息/链路族/baggage），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
 }
 
@@ -264,6 +268,37 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Domain", "www.workbuddy.ai")
 }
 
+// 官方模型客户端是 stainless 生成的 JavaScript SDK（包版本 6.25.0），每次 chat 都带
+// 一组 x-stainless-* 头描述「客户端运行环境」。2026-10-28 抓官方 CLI 2.165.0 实测：
+//
+//	arch=x64  lang=js  os=Windows  package-version=6.25.0
+//	retry-count=0  runtime=node  runtime-version=v22.22.2
+//
+// 这些值描述的是**客户端**而不是我们的服务器：我们的出站身份就是「Windows 上的
+// WorkBuddy 桌面端」，所以与 UA 自洽。缺了它们，UA 自称桌面包却无任何 SDK 痕迹，
+// 是可判别的不一致。
+//
+// 版本相关：package-version 随 CLI 捆绑的 SDK 走，CLI 版本升级时要一并对齐。
+const (
+	sdkArch           = "x64"
+	sdkOS             = "Windows"
+	sdkPackageVersion = "6.25.0"
+	sdkRuntimeVersion = "v22.22.2"
+)
+
+func (c *Client) injectSDKHeaders(req *http.Request) {
+	h := req.Header
+	h.Set("x-stainless-arch", sdkArch)
+	h.Set("x-stainless-lang", "js")
+	h.Set("x-stainless-os", sdkOS)
+	h.Set("x-stainless-package-version", sdkPackageVersion)
+	// retry-count：官方每次 HTTP 尝试从 0 起算。网关侧的换号是一组独立的出站请求，
+	// 每条都是「第一次尝试」，所以恒 0。
+	h.Set("x-stainless-retry-count", "0")
+	h.Set("x-stainless-runtime", "node")
+	h.Set("x-stainless-runtime-version", sdkRuntimeVersion)
+}
+
 // injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合）。
 // 头族分四层，各司其职：
 //   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。空则不发——
@@ -273,24 +308,49 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立，**两者同值**，
 //     形态 32 位小写 hex（CLI 内核 `randomUUID().replace(/-/g,"")`）。
 //   - X-Root-Request-ID：= conversationRequestID（根请求追踪）。
-//   - X-Trace-ID：入站透传或 = conversationRequestID。
-//   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
-//     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
-//     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
+//   - 链路族：traceparent / b3 / X-Trace-ID / X-B3-TraceId / X-B3-SpanId /
+//     X-B3-ParentSpanId / X-B3-Sampled 共用**一个自洽的 OTEL trace**（trace id 随会话
+//     稳定、span id 每请求新、parent span 是会话根 span），详见 traceID32 注释。
+//   - baggage：`codebuddy.session_id=<会话 id>,codebuddy.conversation_request_id=<轮级 id>`。
 //
-// acpConnectionID 由会话 id 派生 UUID v4 形态的 acp-connection-id。
+// traceID32 由会话 id 派生 32 位小写 hex 的 trace id。
 //
-// 官方 5.9.2 桌面端在 ACP 会话建立时用 crypto.randomUUID() 生成一次，随后该会话的
-// 所有 chat 请求复用同一个值（VlmGateway.acquire 的 bySession 表）。这里改用 sha256
-// 确定性派生：同一 conversationID 恒得同值（等价「会话内复用」），会话间互异，
-// 且形态与官方一致（8-4-4-4-12 小写 hex，版本位 4、variant 位 RFC 4122）。
-func acpConnectionID(seed string) string {
-	sum := sha256.Sum256([]byte("wb2a:acp:" + seed))
-	b := sum[:16]
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // variant RFC 4122
-	h := hex.EncodeToString(b)
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+// 官方发的是**一个自洽的 OTEL trace**：traceparent / b3 / X-Trace-ID / X-B3-TraceId
+// 共用同一个 trace id，span id 每请求新，parent span 是会话根 span。
+// 2026-10-28 用 CODEBUDDY_BASE_URL 把官方 CLI 2.165.0 指到本地假上游抓包实测：
+// 同一进程内两条 chat 的 trace id 相同（677de9f8…）、span id 不同、parent span 相同
+// （e7f652b6…）——即 trace 随会话稳定。这里按 conversationID 确定性派生，
+// 得到同样的「会话内稳定、会话间互异」。
+func traceID32(seed string) string {
+	sum := sha256.Sum256([]byte("wb2a:trace:" + seed))
+	return hex.EncodeToString(sum[:16])
+}
+
+// parentSpanOf 由会话 id 派生 16 位 hex 的会话根 span id（会话内稳定）。
+func parentSpanOf(seed string) string {
+	sum := sha256.Sum256([]byte("wb2a:pspan:" + seed))
+	return hex.EncodeToString(sum[:8])
+}
+
+// uuidForm 把 32 位 hex 排成 8-4-4-4-12 的 UUID 形态。
+//
+// 官方 X-Conversation-ID 是带连字符的 UUID（抓包：01a18013-46ce-7483-bddd-2e90d2c24a59）；
+// 我们的内部派生键是 `d-<32hex>`（34 字符，不是 UUID），直接发出去形态就不一致。
+// 只在发头时排一次，内部键不动（会话绑定仍按原键）。
+func uuidForm(h32 string) string {
+	if len(h32) != 32 {
+		return h32
+	}
+	return h32[0:8] + "-" + h32[8:12] + "-" + h32[12:16] + "-" + h32[16:20] + "-" + h32[20:32]
+}
+
+// conversationHeaderID 发头用的会话 id：内部派生键 d-<32hex> 转 UUID 形态；
+// 客户端透传的原值原样发出（不改别人给的 id）。
+func conversationHeaderID(id string) string {
+	if strings.HasPrefix(id, "d-") {
+		return uuidForm(id[2:])
+	}
+	return id
 }
 
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
@@ -323,32 +383,35 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	if conversationID == "" {
 		conversationID = session.NewMessageID()
 	}
-	req.Header.Set("X-Conversation-ID", conversationID)
+	convHeaderID := conversationHeaderID(conversationID)
+	req.Header.Set("X-Conversation-ID", convHeaderID)
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
-	// acp-connection-id：5.9.2 桌面端把 chat 请求统一走 VlmGateway 转发器，它的
-	// applyGatewayHeaders 无条件设这个头，值来自 acquire() 时按 sessionId 生成的
-	// metadata.acpConnectionId——**同一会话恒同值、会话间不同**。
-	// 这里按 conversationID 派生，天然满足该语义；官方是会话建立时随机生成，
-	// 我们用 sha256 确定性派生，形态（UUID v4）与官方一致。
-	req.Header.Set("acp-connection-id", acpConnectionID(conversationID))
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)
 	// X-Root-Request-ID：CLI 内核在 resolveRootRequestId() 非空时必发，主对话即
-	// 「本次 user send 的根请求」= conversationRequestID。v1.16.0 曾按 ACP 层判断
-	// 成「只有 subagent 才发」而剥掉，是错层判断，这里恢复。
-	traceID := meta.TraceID
-	if traceID == "" {
-		traceID = convReqID
-	}
+	// 「本次 user send 的根请求」= conversationRequestID（抓包实证：用户对话那条带它，
+	// 自动生成标题那条不带——与「有根请求才发」的写法一致）。
 	req.Header.Set("X-Root-Request-ID", convReqID)
-	req.Header.Set("X-Trace-ID", traceID)
-	b3Trace := convReqID
-	if !validTraceID(b3Trace) {
-		b3Trace = messageID // 非法 B3 TraceId → 回落恒 32 hex 的消息级 ID
+	// 链路族：自洽的 OTEL trace（见 traceID32 注释）。
+	// 此前直接拿 conversationRequestID 当 trace id、SpanId 取 messageID[:16]、
+	// 且没有 traceparent / b3 / ParentSpanId——「有 B3 的分片但没有 trace 上下文」。
+	traceID := meta.TraceID
+	if len(traceID) != 32 || !validTraceID(traceID) {
+		traceID = traceID32(conversationID)
 	}
-	req.Header.Set("X-B3-TraceId", b3Trace)
-	req.Header.Set("X-B3-SpanId", messageID[:16])
+	spanID := session.NewMessageID()[:16] // 每请求新 span（与消息 id 互不关联）
+	parentSpanID := parentSpanOf(conversationID)
+	req.Header.Set("X-Trace-ID", traceID)
+	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentSpanID)
+	req.Header.Set("X-B3-TraceId", traceID)
+	req.Header.Set("X-B3-ParentSpanId", parentSpanID)
+	req.Header.Set("X-B3-SpanId", spanID)
 	req.Header.Set("X-B3-Sampled", "1")
+	// baggage：官方把会话 id 与轮级请求 id 作为 W3C baggage 双发（抓包实测
+	// `codebuddy.session_id=…,codebuddy.conversation_request_id=…`）。
+	req.Header.Set("baggage", "codebuddy.session_id="+convHeaderID+
+		",codebuddy.conversation_request_id="+convReqID)
 }
 
 // validTraceID 判断 B3 TraceId 是否合法：16 或 32 位 hex（大小写均可）。
@@ -393,8 +456,9 @@ func (c *Client) injectAttribution(req *http.Request) {
 	// agent 语义头，取值来自 CLI 内核 constants 与 getCustomHeaders：
 	//   - X-Agent-Intent：主对话恒 craft（subagent 才变）
 	//   - X-Agent-Type：主对话恒 main
-	//   - X-Agent-Runtime：AGENT_RUNTIMES = [local-agent, cloud-agent, agent-agent]，
-	//     桌面端是本地 agent → local-agent
+	//   - X-Agent-Runtime：抓包实测官方 CLI 2.165.0 发 **other**（不是常量表里的
+	//     local-agent/cloud-agent/agent-agent——那是枚举全集，实际取值由运行时判定，
+	//     桌面端内置 CLI 落到 other）。v1.16.1 曾按枚举猜 local-agent，是猜的。
 	//   - X-Private-Data：**不是恒 true**。CLI 里是
 	//         A ? "false" : "true"
 	//     A = resolveModelOptimizationEnabled({productDefaultEnabled:
@@ -403,7 +467,7 @@ func (c *Client) injectAttribution(req *http.Request) {
 	//     语义即「数据可用于模型优化」为真。v1.16.0 一律发 true，方向反了。
 	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Type", "main")
-	req.Header.Set("X-Agent-Runtime", "local-agent")
+	req.Header.Set("X-Agent-Runtime", "other")
 	req.Header.Set("X-Private-Data", "false")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
