@@ -1049,6 +1049,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if status >= 400 {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = status
+			// 上游业务码落请求日志：下次出现同类 400 时，`upstream_code` 直接给出
+			// 11101/11128/6004 这类判据，不用再翻容器日志或别家网关的日志。
+			st.upstreamCode = upstream.BusinessCode(respBody)
 			var kind upstream.ErrKind
 			if uerr != nil {
 				kind = uerr.Kind

@@ -810,3 +810,23 @@ func TestGzipRequestBody(t *testing.T) {
 		t.Errorf("压不动的体不该发压缩体: %d -> %d", len(rnd), len(out))
 	}
 }
+
+// TestBusinessCode 从上游错误体取业务码：数字/字符串两种都认，取不到给 0。
+func TestBusinessCode(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"code":11101,"msg":"bad"}`, 11101},
+		{`{"code":"11128","msg":"channel"}`, 11128},
+		{`{"error":{"code":6004}}`, 6004},
+		{`{"msg":"no code here"}`, 0},
+		{`not json`, 0},
+		{``, 0},
+	}
+	for _, c := range cases {
+		if got := BusinessCode([]byte(c.body)); got != c.want {
+			t.Errorf("BusinessCode(%q) = %d want %d", c.body, got, c.want)
+		}
+	}
+}

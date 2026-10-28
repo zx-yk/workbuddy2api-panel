@@ -12,6 +12,8 @@ package upstream
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -163,3 +165,24 @@ func codeMarker(lower, code string) bool {
 	}
 	return false
 }
+
+// BusinessCode 从上游错误体里取业务错误码（11101/11128/6004 这类）；取不到返回 0。
+//
+// 只取数字码、不取 msg：请求日志的既有约定是「只写元数据，不写响应正文」，
+// 错误码足以定位问题类别（例如 11101 即请求体反序列化失败）。
+func BusinessCode(body []byte) int {
+	if len(body) == 0 || len(body) > 1<<16 {
+		return 0
+	}
+	m := businessCodeRe.FindSubmatch(body)
+	if len(m) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+var businessCodeRe = regexp.MustCompile(`"code"\s*:\s*"?([0-9]{3,6})"?`)

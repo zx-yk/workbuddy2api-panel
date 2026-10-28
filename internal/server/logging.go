@@ -65,6 +65,8 @@ type chatStat struct {
 	cacheHit  int64
 	cacheMiss int64
 	hasCache  bool
+	// upstreamCode 上游业务错误码（仅 4xx/5xx 填充），供请求日志定位失败原因。
+	upstreamCode int
 
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
@@ -379,7 +381,7 @@ type requestTrace struct {
 	// model 非 chat 路径的模型标识（搜索写 "WorkBuddy搜索工具"）。chat 路径由
 	// chatStat.model 覆盖，二者不会同时生效。
 	model string
-	stat    *chatStat
+	stat  *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
@@ -477,6 +479,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
+		e.UpstreamCode = s.upstreamCode
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

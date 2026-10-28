@@ -48,6 +48,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if _, has := obj["stream_options"]; !has {
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
+	normalizeStop(obj)
 	normalizeToolChoice(obj)
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
@@ -95,6 +96,35 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		return src
 	}
 	return out
+}
+
+// normalizeStop 把 `stop` 归一成数组。
+//
+// OpenAI 规范里 stop 是 `string | string[]`（两种都合规），但上游 Go 端字段是
+// `[]string`，收到字符串直接反序列化失败：
+//
+//	{"code":11101,"msg":"Unmarshal chat params failed with error:
+//	 json: cannot unmarshal string into Go struct field Request.stop of type []string"}
+//
+// 实测：`"stop":"END"` → 400 11101；`"stop":["END"]` → 200，这批 400 全部由这一个
+// 原因引起，来源多为按规范发字符串的客户端。
+// 客户端按规范发字符串没有错，这里替上游放宽：字符串包成单元素数组。
+//
+// 只处理字符串这一种：数组原样、空串按「未设置」删掉（`[""]` 对上游是无意义值）、
+// 其它畸形类型不动（留给上游报 11101，不掩盖真正的脏数据）。
+func normalizeStop(obj map[string]any) {
+	v, ok := obj["stop"]
+	if !ok {
+		return
+	}
+	switch t := v.(type) {
+	case string:
+		if t == "" {
+			delete(obj, "stop")
+			return
+		}
+		obj["stop"] = []any{t}
+	}
 }
 
 // translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游

@@ -37,12 +37,47 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.2-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.3-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.3 · 2026-10-28
+
+修一个由 `stop` 字段类型引起的 400 兼容性缺口，并给请求日志补一个能定位上游失败原因的字段。
+
+**`stop` 归一化（主修）**
+- OpenAI 规范里 `stop` 是 `string | string[]`（两种都合规），但上游 Go 端字段是
+  `[]string`，收到字符串直接反序列化失败：
+
+  ```
+  {"code":11101,"msg":"Unmarshal chat params failed with error:
+   json: cannot unmarshal string into Go struct field Request.stop of type []string"}
+  ```
+- 表现：客户端按 OpenAI 规范发 `"stop": "END"`（字符串）时整单 400；改发
+  `"stop": ["END"]`（数组）则正常。客户端没有写错，是上游比规范更严。
+- 处理：网关在出站前替上游放宽——字符串包成单元素数组。数组原样，空串按「未设置」删掉，
+  其它畸形类型（数字等）不动，留给上游报 11101，不掩盖真正的脏数据。
+- 覆盖所有入站格式（chat / Anthropic `/v1/messages` 的 `stop_sequences` / Responses），
+  因为挂在发上游前的最后一次改写（`payload.go`）。
+
+**请求日志补 `upstream_code`**
+- 4xx/5xx 时把上游业务码（11101 / 11128 / 6004 …）写进 `request-logs` 的
+  `upstream_code` 字段。**只记数字码、不记 msg**，保持 reqlog 既有约定
+  （不写提示词、响应正文、凭证）。
+- 起因：4xx 时请求日志只有状态码与耗时，想知道具体是哪类上游拒绝只能人工去追响应体。
+  有了这个字段，同类失败看一眼 `upstream_code` 就能定性。
+
+**验证**
+- 单元：`stop` 四种形态（字符串 / 数组 / 空串 / 数字）+ `BusinessCode` 六种输入
+  + 请求日志 `upstream_code` 落档
+- 本地假上游：确认出站实体里的 `stop` 已是数组
+- 真实上游：chat 的「无 stop / 字符串 / 数组」与 `/v1/messages` 的
+  「无 / `stop_sequences` 数组 / 字符串」六种组合均正常；`stop` 为数字时仍返回 400
+  （不透传脏数据），日志记录 `upstream_code=11101`
+- `go test ./...`、`go vet` 全通过，`-race` 无告警
 
 ### v1.16.2 · 2026-10-28
 
@@ -497,7 +532,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.2` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.3` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -509,17 +544,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.2-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.2-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.2-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.2-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.2-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.3-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.3-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.3-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.3-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.3-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.2
+V=1.16.3
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
