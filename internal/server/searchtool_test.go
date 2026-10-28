@@ -24,7 +24,7 @@ type searchToolFake struct {
 func (f *searchToolFake) client() *upstream.Client {
 	return &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			raw, _ := io.ReadAll(r.Body)
+			raw := readUpstreamBody(r)
 			if strings.HasPrefix(r.URL.Path, "/agenttool/v1/search") {
 				var q struct {
 					Query string `json:"query"`

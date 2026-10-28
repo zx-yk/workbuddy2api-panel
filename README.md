@@ -37,12 +37,86 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.0-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.1-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.1 · 2026-10-28
+
+**本版修正 v1.16.0 的三处判断错误，并补上请求体 gzip。** 根因是找错了层：WorkBuddy
+桌面端是「Electron UI + 内置 CLI 内核」两层结构，chat 请求由
+`resources/app.asar.unpacked/cli/`（`@genie/agent-cli`，Node 实现）发出，**不经
+`app.asar` 里的 `applyGatewayHeaders`**——那套是 UI→CLI 的 ACP 元数据头。v1.16.0
+照着 ACP 层改了 chat 头，增删方向对，但 ID 部分全错。
+
+**修正**
+- `X-Request-ID` 与 `X-Conversation-Message-ID` 恢复**同值**、形态回 **32 位小写 hex**。
+  CLI 内核实际代码是 `q = messageId ?? randomUUID().replace(/-/g,"")`，两个头共用一个 `q`。
+  实测也能反证：用 32 hex 时上游响应的 `id` 是 32 hex（`66bba412…`），用 UUID 形态时
+  响应 `id` 变成带连字符的 UUID——上游确实按头的形态分流。
+- 恢复 `X-Root-Request-ID`。CLI 的 `resolveRootRequestId()` 非空时必发，主对话即
+  `conversationRequestID`；v1.16.0 误判成「只有 subagent 才发」而剥掉。
+- `X-Private-Data` 改 **`false`**。CLI 里是 `A ? "false" : "true"`，`A` 为「模型优化
+  已启用」，`product.json` 的 `DefaultModelOptimizationOff=false` → 优化开启 → `false`。
+  v1.16.0 按「桌面端恒 true」写反了方向。
+- 补 `X-Agent-Runtime: local-agent`（`AGENT_RUNTIMES = [local-agent, cloud-agent,
+  agent-agent]`，桌面端是本地 agent）。
+- 头总数 28 → 30（恢复 root、新增 runtime）。
+
+**请求体 gzip**
+- chat 请求体按官方 `productFeature.RequestBodyGzip=true` 压缩（`Content-Encoding: gzip`）。
+  上游接受明文与 gzip 两种实体。收益在上行带宽：长上下文压缩后通常降到 1/3~1/5，
+  首字节时间的传输段收益明显。
+- 体积 < 512B 或压缩后不小于原体积 90% 时不压缩（短请求压了只是白花 CPU 并多一层形态差异）。
+
+**v1.16.0 中判定正确、本版未改的**
+- 剥 `Origin` / `Referer` / `Accept-Language` / `X-Machine-ID` / `X-Session-ID`：CLI 内核
+  不发；其中 `X-Session-ID` 在 CLI 里只有常量定义、从无设置点。
+- 个人号不发 `X-No-*`：`X-No-Authorization` / `X-No-User-Id` / `X-No-Enterprise-Id` /
+  `X-No-Department-Info` 只出现在 `/v2/auth/state` 那类「我无身份」的探测请求里，chat 不带。
+- `X-Product: SaaS`、`X-Agent-Intent: craft`、`X-Agent-Type: main`、`acp-connection-id`、
+  `Accept: application/json`、版本 5.9.3 统一、硬件指纹按账号派生、sanitize 两条。
+
+> gzip 的边界：本版只压 chat completions 请求体，搜索/上报等其余接口维持明文——官方这些
+> 接口各自独立，未逐一验证过它们的 gzip 接受度，不做未验证的改动。
+
+### v1.16.0 · 2026-10-28
+
+本版只动「出站请求长什么样」，不改 API 契约与响应格式。依据是官方桌面端 **5.9.3** 的
+`app.asar`（`applyGatewayHeaders` / `buildVlmGatewayHeaders` / `applyTraceHeaders`）与
+`install-manifest.json` 的 `appVersion` 逐项对照。
+
+**出站身份**
+- `X-Product` 恒 `SaaS`。产品名由 `X-IDE-Name/Type/Version` 承载，此前跟随 `client_name`
+  发 `WorkBuddy`，与同一账号事件上报通道（`/v2/report` 恒 `SaaS`）自相矛盾。
+- 补 `X-Agent-Intent: craft`、`X-Agent-Type: main`、`X-Private-Data`：三者此前只在专家对话
+  那条路径上有，主 chat 缺——同一条链路两条路径的头集合不一致。
+- 补 `acp-connection-id`：按 `conversationID` 确定性派生 UUID v4（会话内恒同值、会话间不同）。
+- 剥离 `Origin` / `Referer` / `Accept-Language` / `X-Machine-ID` / `X-Session-ID`。
+- 个人号不再发 `X-No-*` 哨兵头；企业号仍注入 `X-Enterprise-Id` / `X-Tenant-Id`。
+- 剥离 `X-Root-Request-ID`（**此处判断有误，v1.16.1 已恢复**）。
+- `Accept` 改回 `application/json`（不用 Accept 协商 SSE，上游按 `stream=true` 决定）。
+- `X-Request-ID` 与 `X-Conversation-Message-ID` 改为两个独立 UUID v4
+  （**此处判断有误，v1.16.1 已回正为同值 32 hex**）。
+- 版本统一到 5.9.3 单一来源：`desktopUA` 由硬编码常量改为方法，与 `X-IDE-Version`、
+  事件上报的 `ideVersion`/`extVersion` 共用 `clientVersion()`。此前 chat 报 `5.5.4`、
+  上报报 `5.5.6`。
+- 桌面事件上报的硬件指纹改为按账号派生（`cpuCores`/`memorySize`/`osVersion` 从 9 组真实
+  机型里按 uid 确定性挑选）。此前所有账号共用同一套硬编码值（20 核 / 24GB / 10.0.26220）。
+
+**指纹脱敏补两条**
+- `Codex CLI is an open source project led by OpenAI`：上游列为 system 首行的触发 token，
+  可单独出现；已有的 `You are a coding agent running in the Codex CLI` 是三句连排整段，
+  覆盖不到单独出现的情形。改写 `open source` → `open-source`。
+- DSH 系统提示的两句路径说明（`Tokens prefixed with @ are paths…` 与 `Relative paths
+  resolve…`）相邻连排即触发渠道校验；在 `are paths` 后插入 `that` 拆断连排，语义不变。
+
+> 诚实说明：四组指纹场景（Claude Code 身份句首行 / Codex 说明句 / DSH 跨句 / 基线）验证均
+> 正常；**关掉脱敏后同样正常**——当前上游对这些 token 并不拦，两条规则是低成本保险，
+> 不是「修复了 11128」。
 
 ### v1.15.0 · 2026-10-28
 
@@ -378,7 +452,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.0` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.1` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -390,17 +464,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.0-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.0-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.0-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.0-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.0-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.1-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.1-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.1-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.1-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.1-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.0
+V=1.16.1
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums

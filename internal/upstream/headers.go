@@ -3,7 +3,6 @@
 package upstream
 
 import (
-	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -271,32 +270,14 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //     透传客户端原值优先，客户端没给就不伪造，避免误导后台建错会话。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
-//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
+//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立，**两者同值**，
+//     形态 32 位小写 hex（CLI 内核 `randomUUID().replace(/-/g,"")`）。
 //   - X-Root-Request-ID：= conversationRequestID（根请求追踪）。
 //   - X-Trace-ID：入站透传或 = conversationRequestID。
 //   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
 //     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
 //     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
 //
-// uuidV4 生成 RFC 4122 v4 形态的 UUID（8-4-4-4-12 小写 hex）。
-//
-// 官方 5.9.2 的 applyGatewayHeaders 用 crypto.randomUUID() 生成 X-Conversation-
-// Message-ID 与 X-Request-ID——两者是**各自独立**的两个随机 UUID（带连字符）。
-// 我们此前把 X-Request-ID 设成与 Message-ID 同值、且都是 32 hex 无连字符，
-// 既形态不同、又自证「请求 id 就是消息 id」这一官方不成立的关系。
-//
-// 熵源故障时退化成 32 hex（仍是非空唯一 id），不 panic、不返回空串。
-func uuidV4() string {
-	b := make([]byte, 16)
-	if _, err := cryptorand.Read(b); err != nil {
-		return session.NewMessageID()
-	}
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	h := hex.EncodeToString(b)
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
-}
-
 // acpConnectionID 由会话 id 派生 UUID v4 形态的 acp-connection-id。
 //
 // 官方 5.9.2 桌面端在 ACP 会话建立时用 crypto.randomUUID() 生成一次，随后该会话的
@@ -319,11 +300,21 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		// 本级补一个 32 hex，调用方（handler）已生成稳定的不走到这里。
 		convReqID = session.NewMessageID()
 	}
-	messageID := uuidV4()
-	// X-Request-ID 与 Message-ID 是**两个独立的**随机 UUID（官方 applyGatewayHeaders
-	// 各自调一次 randomUUID）。此前这里复用了 messageID，等于向服务端声明
-	// 「请求 id == 消息 id」——官方不存在这种关系，是可判别的形态差异。
-	requestID := uuidV4()
+	// 消息级 ID：32 位小写 hex（session.NewMessageID）。
+	//
+	// 形态与关系都按桌面端内置 CLI 内核（`@genie/agent-cli` 的
+	// codebuddy-lite-wb.mjs）回正：
+	//
+	//	let q = W?.messageId ?? randomUUID().replace(/-/g,"")   // 32hex，去掉连字符
+	//	N[CONVERSATION_MESSAGE_ID_HEADER] = $.messageId
+	//	N[REQUEST_ID_HEADER]              = $.messageId          // 同一个值
+	//	… setHeaderCaseInsensitive(REQUEST_ID_HEADER, q)
+	//	… setHeaderCaseInsensitive(CONVERSATION_MESSAGE_ID_HEADER, q)
+	//
+	// 即：两个头**同值**，且是 32 hex。v1.16.0 曾按 app.asar 的
+	// applyGatewayHeaders（ACP 元数据层）改成两个独立 UUID v4，那是错层——
+	// chat 请求由 CLI 内核发出，不经那条路径。
+	messageID := session.NewMessageID()
 	// 会话头三元组必须齐全：国际端点收紧通道校验后，缺 X-Conversation-ID 的
 	// 请求会直接 400 / 11128（conversation id missing）。入站没带会话 ID 时
 	// 本级补一个 32 hex（与 X-Conversation-Request-ID 的零值兜底同口径），
@@ -341,14 +332,15 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	// 我们用 sha256 确定性派生，形态（UUID v4）与官方一致。
 	req.Header.Set("acp-connection-id", acpConnectionID(conversationID))
 	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", requestID)
-	// 不发 X-Root-Request-ID：官方桌面端主对话的构造里没有它（applyGatewayHeaders
-	// 只设 Conversation-* 三件套与 Request-ID），只有 subagent 才带 rootRequestId。
-	// 网关发出的每条都是主对话请求，带上就是多一个官方不存在的头。
+	req.Header.Set("X-Request-ID", messageID)
+	// X-Root-Request-ID：CLI 内核在 resolveRootRequestId() 非空时必发，主对话即
+	// 「本次 user send 的根请求」= conversationRequestID。v1.16.0 曾按 ACP 层判断
+	// 成「只有 subagent 才发」而剥掉，是错层判断，这里恢复。
 	traceID := meta.TraceID
 	if traceID == "" {
 		traceID = convReqID
 	}
+	req.Header.Set("X-Root-Request-ID", convReqID)
 	req.Header.Set("X-Trace-ID", traceID)
 	b3Trace := convReqID
 	if !validTraceID(b3Trace) {
@@ -398,13 +390,21 @@ func (c *Client) injectAttribution(req *http.Request) {
 		return
 	}
 	req.Header.Set("X-Agent-Purpose", "conversation")
-	// X-Agent-Intent/X-Agent-Type 是官方 applyGatewayHeaders 里固定的 agent 语义头
-	// （主对话恒 craft / main，只有 subagent 会变）；X-Private-Data 桌面端恒 true。
-	// 三者此前只在 DesktopChatWithExpert 那条专家路径上有，主 chat 缺——同一条
-	// 链路两条路径的头集合不一致，比单独缺一个头更容易被识别。
+	// agent 语义头，取值来自 CLI 内核 constants 与 getCustomHeaders：
+	//   - X-Agent-Intent：主对话恒 craft（subagent 才变）
+	//   - X-Agent-Type：主对话恒 main
+	//   - X-Agent-Runtime：AGENT_RUNTIMES = [local-agent, cloud-agent, agent-agent]，
+	//     桌面端是本地 agent → local-agent
+	//   - X-Private-Data：**不是恒 true**。CLI 里是
+	//         A ? "false" : "true"
+	//     A = resolveModelOptimizationEnabled({productDefaultEnabled:
+	//         !productFeature.DefaultModelOptimizationOff})
+	//     product.json 的 DefaultModelOptimizationOff = false → 优化开启 → 取 "false"
+	//     语义即「数据可用于模型优化」为真。v1.16.0 一律发 true，方向反了。
 	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Type", "main")
-	req.Header.Set("X-Private-Data", "true")
+	req.Header.Set("X-Agent-Runtime", "local-agent")
+	req.Header.Set("X-Private-Data", "false")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion())

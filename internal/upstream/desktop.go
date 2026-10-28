@@ -487,14 +487,17 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
-	// X-Request-ID 恒 32 位小写 hex（官方形态）。此前是 19 位纳秒数字——
-	// 与同批 desktop 上报通道的形态也不一致，两处都统一到 session.NewMessageID。
-	h.Set("X-Request-ID", session.NewMessageID())
+	// 消息级 ID：X-Request-ID 与 X-Conversation-Message-ID **同值**、32 位小写 hex
+	// （CLI 内核 randomUUID().replace(/-/g,"") 后两个头吃同一个值）。
+	msgID := session.NewMessageID()
+	h.Set("X-Conversation-Message-ID", msgID)
+	h.Set("X-Request-ID", msgID)
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
-	// X-Private-Data 桌面端恒 true——这条专家路径此前独独漏了它，而主 chat 路径
-	// 也没有（两边都不发，等于整条链路缺同一个头）。
-	h.Set("X-Private-Data", "true")
+	h.Set("X-Agent-Runtime", "local-agent")
+	// X-Private-Data = "false"：模型优化默认开启（product.json 的
+	// DefaultModelOptimizationOff=false），CLI 此时发 false。原发 true 方向反了。
+	h.Set("X-Private-Data", "false")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Version", c.clientVersion())

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -305,7 +306,7 @@ func TestRefreshSessionDead(t *testing.T) {
 
 func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 	var gotAuth, gotUID, gotProduct string
-	var gotIntent, gotAgentType, gotPrivate string
+	var gotIntent, gotAgentType, gotRuntime, gotPrivate string
 	var gotBody []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		gotAuth = r.Header.Get("Authorization")
@@ -313,6 +314,7 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		gotProduct = r.Header.Get("X-Product")
 		gotIntent = r.Header.Get("X-Agent-Intent")
 		gotAgentType = r.Header.Get("X-Agent-Type")
+		gotRuntime = r.Header.Get("X-Agent-Runtime")
 		gotPrivate = r.Header.Get("X-Private-Data")
 		gotBody, _ = io.ReadAll(r.Body)
 		return &http.Response{
@@ -335,11 +337,16 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
-	// X-Agent-Intent / X-Agent-Type / X-Private-Data：官方 applyGatewayHeaders 固定发送，
-	// 且桌面端 X-Private-Data 恒 true（不分个人/企业）。此前主 chat 路径三个都缺，
-	// 只有专家对话那条路径带了前两个——同一网关两条路径的头集合不一致。
-	if gotIntent != "craft" || gotAgentType != "main" || gotPrivate != "true" {
-		t.Errorf("agent headers: intent=%q type=%q private=%q want craft/main/true", gotIntent, gotAgentType, gotPrivate)
+	// agent 语义头，取值按 CLI 内核：
+	//   X-Agent-Intent=craft、X-Agent-Type=main、X-Agent-Runtime=local-agent（桌面端本地 agent）
+	//   X-Private-Data=**false**——CLI 里是 `A ? "false" : "true"`，A 为「模型优化已启用」，
+	//   product.json 的 DefaultModelOptimizationOff=false → 优化开启 → false。
+	//   原先按「桌面端恒 true」写反了方向。
+	if gotIntent != "craft" || gotAgentType != "main" || gotRuntime != "local-agent" {
+		t.Errorf("agent headers: intent=%q type=%q runtime=%q want craft/main/local-agent", gotIntent, gotAgentType, gotRuntime)
+	}
+	if gotPrivate != "false" {
+		t.Errorf("X-Private-Data=%q want false（模型优化默认开启时 CLI 发 false）", gotPrivate)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
 		t.Errorf("stream not forced: %s", gotBody)
@@ -760,5 +767,46 @@ func TestFrameKindPreservesCapacityCodes(t *testing.T) {
 		if got := FrameKind(tc.payload); got != tc.want {
 			t.Errorf("FrameKind(%s)=%v want %v", tc.payload, got, tc.want)
 		}
+	}
+}
+
+// TestGzipRequestBody 请求体压缩：大体积压且可无损还原，小体积不压。
+//
+// 官方 CLI 的 productFeature.RequestBodyGzip=true，chat 请求体默认 gzip。上游对
+// 明文与 gzip 两种实体均可接受；收益在上行带宽。
+func TestGzipRequestBody(t *testing.T) {
+	// 可压缩的长体（真实 prompt 是自然语言，重复度高）
+	big := bytes.Repeat([]byte(`{"role":"user","content":"请分析这段日志里的错误原因。"},`), 80)
+	out, ok := gzipRequestBody(big)
+	if !ok {
+		t.Fatal("大体积请求体应被压缩")
+	}
+	if len(out) >= len(big)/2 {
+		t.Errorf("压缩比不合理: %d -> %d", len(big), len(out))
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("解压失败: %v", err)
+	}
+	back, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("读取解压体失败: %v", err)
+	}
+	if !bytes.Equal(back, big) {
+		t.Error("解压后与原文不一致（压缩有损）")
+	}
+
+	// 短体不压（避免白花 CPU 与多一层形态差异）
+	small := []byte(`{"model":"glm-5.2","messages":[]}`)
+	if _, ok := gzipRequestBody(small); ok {
+		t.Error("短请求体不该压缩")
+	}
+	// 不可压缩体（随机噪声）也不该发压缩体
+	rnd := make([]byte, 2048)
+	for i := range rnd {
+		rnd[i] = byte(i * 37 % 251)
+	}
+	if out, ok := gzipRequestBody(rnd); ok && len(out) >= len(rnd)*9/10 {
+		t.Errorf("压不动的体不该发压缩体: %d -> %d", len(rnd), len(out))
 	}
 }

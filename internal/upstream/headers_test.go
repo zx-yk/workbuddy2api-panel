@@ -21,9 +21,11 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 	c.ChatHeaders(req, testAuth(), "", ChatMeta{})
 
 	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
-	// 会话 id 与轮级请求 id 是 32 hex；Message-ID 走 UUID v4（带连字符）——
-	// 官方 applyGatewayHeaders 用 randomUUID() 生成消息 id 与请求 id，与 32 hex 的
-	// 轮级聚合主键不是同一形态族，别把三者当成同一种 id。
+	// 会话 id、轮级请求 id、消息级 id 全是 32 位小写 hex。消息级两个头
+	// （X-Conversation-Message-ID 与 X-Request-ID）**同值**——CLI 内核里是
+	// `q = randomUUID().replace(/-/g,"")`，两个头都吃同一个 q。
+	// v1.16.0 曾按 app.asar 的 applyGatewayHeaders 改成两个独立 UUID v4，那是错层
+	// （那是 UI→CLI 的 ACP 元数据层，chat 由 CLI 内核发出）。
 	for _, h := range []string{"X-Conversation-ID", "X-Conversation-Request-ID"} {
 		v := req.Header.Get(h)
 		if v == "" {
@@ -33,8 +35,15 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 			t.Errorf("%s = %q, want 32 hex", h, v)
 		}
 	}
-	if v := req.Header.Get("X-Conversation-Message-ID"); !acpUUIDRe.MatchString(v) {
-		t.Errorf("X-Conversation-Message-ID = %q, want UUID v4", v)
+	msgID := req.Header.Get("X-Conversation-Message-ID")
+	if !hex32.MatchString(msgID) {
+		t.Errorf("X-Conversation-Message-ID = %q, want 32 hex", msgID)
+	}
+	if got := req.Header.Get("X-Request-ID"); got != msgID {
+		t.Errorf("X-Request-ID=%q 应与 X-Conversation-Message-ID=%q 同值", got, msgID)
+	}
+	if v := req.Header.Get("X-Root-Request-ID"); v == "" {
+		t.Error("X-Root-Request-ID 缺失（CLI 主对话会发 = conversationRequestID）")
 	}
 
 	// 兜底会话 ID 每次请求新生成（不是常量），且与 request/message ID 不冲突。
