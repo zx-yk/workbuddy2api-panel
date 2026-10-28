@@ -56,6 +56,19 @@ func (c *Client) desktopUA() string {
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
+// setDomainHeader 按官方口径写 X-Domain：取账号登录域（auth.domain，**裸主机名**），
+// 空则不发。
+//
+// 官方 asar 里 29 处 `X-Domain` 全部来自 `auth.domain`（如 www.codebuddy.cn），
+// 没有一处是完整 URL。此前这三处发的是 chatBase/desktopBase（带 scheme 的完整
+// URL，https://www.workbuddy.cn），既与官方不符，也与本网关 chat 路径
+// （a.DomainValue()，裸主机名）自相矛盾。
+func setDomainHeader(h http.Header, a *auth.Auth) {
+	if d := a.DomainValue(); d != "" {
+		h.Set("X-Domain", d)
+	}
+}
+
 // deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId/qimei36 复用），
 // 幂等：同一账号每次生成相同值，模拟固定设备。
 func deriveID(a *auth.Auth, salt string) string {
@@ -74,30 +87,32 @@ type DesktopEvent map[string]any
 //
 // 改为按 uid 从真实常见配置里确定性挑选：账号间互异、单账号跨重启稳定，
 // 且组合都是市面上真实存在的机型（核数:内存GB:Windows build）。
-func desktopHardware(a *auth.Auth) (cpuCores, memoryGB int, osVersion string) {
+func desktopHardware(a *auth.Auth) (cpuCores, memoryGB int, osVersion, cpuModel string) {
+	// cpuModel 与核数取自同一条目，保证指纹自洽（不会报出「4 核的 i9」这种组合）。
 	table := []struct {
 		cpu, mem int
 		build    string
+		model    string
 	}{
-		{8, 16, "10.0.22631"},
-		{12, 32, "10.0.22631"},
-		{16, 32, "10.0.22621"},
-		{20, 32, "10.0.26100"},
-		{24, 64, "10.0.26100"},
-		{6, 8, "10.0.22000"},
-		{10, 16, "10.0.19045"},
-		{14, 24, "10.0.22621"},
-		{4, 8, "10.0.19045"},
+		{8, 16, "10.0.22631", "Intel(R) Core(TM) i7-10700"},
+		{12, 32, "10.0.22631", "Intel(R) Core(TM) i7-12700"},
+		{16, 32, "10.0.22621", "Intel(R) Core(TM) i7-13700"},
+		{20, 32, "10.0.26100", "Intel(R) Core(TM) i7-14700"},
+		{24, 64, "10.0.26100", "Intel(R) Core(TM) i9-14900"},
+		{6, 8, "10.0.22000", "Intel(R) Core(TM) i5-10400"},
+		{10, 16, "10.0.19045", "Intel(R) Core(TM) i5-13400"},
+		{14, 24, "10.0.22621", "Intel(R) Core(TM) i5-13600KF"},
+		{4, 8, "10.0.19045", "Intel(R) Core(TM) i5-8250U"},
 	}
 	sum := sha256.Sum256([]byte("wb2a:hw:" + a.UID))
 	c := table[int(sum[0])%len(table)]
-	return c.cpu, c.mem, c.build
+	return c.cpu, c.mem, c.build, c.model
 }
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
 func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
-	cpuCores, memoryGB, osVersion := desktopHardware(a)
+	cpuCores, memoryGB, osVersion, cpuModel := desktopHardware(a)
 	return map[string]any{
 		"timezone":     "Asia/Shanghai",
 		"reportDelay":  2000,
@@ -118,6 +133,7 @@ func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 		"arch":         "x64",
 		"osVersion":    osVersion,
 		"cpuCores":     cpuCores,
+		"cpuModel":     cpuModel,
 		"memorySize":   memoryGB,
 		"timestamp":    now,
 		"presentAt":    now,
@@ -155,7 +171,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", c.desktopUA())
-	req.Header.Set("X-Domain", c.desktopBase(a))
+	setDomainHeader(req.Header, a)
 	req.Header.Set("X-Product", "SaaS")
 	// X-Request-ID 恒 32 位小写 hex（官方形态）。此前是 deriveID(36hex)+纳秒后 6 位
 	// 的 42 字符混合串——长度与字符集都偏离，且与同批其它通道的纯纳秒数字并存。
@@ -435,7 +451,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", c.desktopUA())
-	req.Header.Set("X-Domain", c.chatBase(a))
+	setDomainHeader(req.Header, a)
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -483,7 +499,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
 	h.Set("User-Agent", c.desktopUA())
-	h.Set("X-Domain", c.chatBase(a))
+	setDomainHeader(h, a)
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)

@@ -32,6 +32,10 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 		if r.Header.Get("X-Product") != "SaaS" {
 			t.Errorf("X-Product=%q want SaaS", r.Header.Get("X-Product"))
 		}
+		// X-Domain 必须是裸主机名（官方全部 auth.domain），不能是带 scheme 的完整 URL。
+		if got := r.Header.Get("X-Domain"); got != "www.codebuddy.cn" {
+			t.Errorf("X-Domain=%q want www.codebuddy.cn（裸主机名，非完整 URL）", got)
+		}
 		// X-Request-ID 恒 32 位小写 hex（官方客户端形态）。此前是
 		// deriveID(36hex)+纳秒后 6 位的 42 字符混合串——长度和字符集都偏离，
 		// 且与同批 DesktopChatWithExpert 的纯 19 位纳秒数字并存。
@@ -47,7 +51,7 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
-	err := c.ReportDesktopEvent(&auth.Auth{AccessToken: "at", UID: "u-dt", Nickname: "RenJie"},
+	err := c.ReportDesktopEvent(&auth.Auth{AccessToken: "at", UID: "u-dt", Nickname: "RenJie", Domain: "www.codebuddy.cn"},
 		DesktopEvent{"eventCode": "agent_task_created", "mode": "craft"})
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
@@ -70,6 +74,10 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	}
 	if ev["userNickname"] != "RenJie" {
 		t.Errorf("userNickname=%v want RenJie", ev["userNickname"])
+	}
+	// cpuModel：官方桌面指纹字段，与核数同一条目派生（自洽）。
+	if _, _, _, wantModel := desktopHardware(&auth.Auth{UID: "u-dt"}); ev["cpuModel"] != wantModel {
+		t.Errorf("cpuModel=%v want %v", ev["cpuModel"], wantModel)
 	}
 	if ev["mode"] != "craft" {
 		t.Errorf("业务字段 mode=%v 被指纹覆盖或缺失", ev["mode"])
@@ -189,24 +197,67 @@ func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 // 此前 cpuCores/memorySize/osVersion 是全局硬编码（20 核 / 24GB / 10.0.26220），
 // 多个账号向同一后台汇报同一台机器——这是比「参数真假」更直接的多账号关联信号。
 func TestDesktopHardwarePerAccount(t *testing.T) {
-	c1, m1, o1 := desktopHardware(&auth.Auth{UID: "u-alpha"})
-	c2, m2, o2 := desktopHardware(&auth.Auth{UID: "u-alpha"})
-	if c1 != c2 || m1 != m2 || o1 != o2 {
-		t.Errorf("同账号应稳定：%d/%d/%s vs %d/%d/%s", c1, m1, o1, c2, m2, o2)
+	c1, m1, o1, cm1 := desktopHardware(&auth.Auth{UID: "u-alpha"})
+	c2, m2, o2, cm2 := desktopHardware(&auth.Auth{UID: "u-alpha"})
+	if c1 != c2 || m1 != m2 || o1 != o2 || cm1 != cm2 {
+		t.Errorf("同账号应稳定：%d/%d/%s/%s vs %d/%d/%s/%s", c1, m1, o1, cm1, c2, m2, o2, cm2)
+	}
+	if !strings.Contains(cm1, "Core(TM)") {
+		t.Errorf("cpuModel=%q 不像真实 CPU 型号串", cm1)
 	}
 
 	seen := map[string]bool{}
+	models := map[string]bool{}
 	for i := 0; i < 12; i++ {
-		c, m, o := desktopHardware(&auth.Auth{UID: fmt.Sprintf("uid-%d", i)})
+		c, m, o, cm := desktopHardware(&auth.Auth{UID: fmt.Sprintf("uid-%d", i)})
 		seen[fmt.Sprintf("%d/%d/%s", c, m, o)] = true
+		models[cm] = true
 		if c < 2 || m < 4 {
 			t.Errorf("派生出的参数不合理：cpu=%d mem=%d", c, m)
 		}
 		if !strings.HasPrefix(o, "10.0.") {
 			t.Errorf("osVersion=%q 不是 Windows 10/11 build 形态", o)
 		}
+		if cm == "" {
+			t.Error("cpuModel 不能为空（官方桌面指纹带这个字段）")
+		}
 	}
 	if len(seen) < 2 {
 		t.Errorf("12 个账号只出现 %d 种硬件组合，派生没起作用", len(seen))
+	}
+	if len(models) < 2 {
+		t.Errorf("12 个账号只出现 %d 种 CPU 型号，派生没起作用", len(models))
+	}
+}
+
+// TestDesktopFingerprintHasCPUModel 桌面事件指纹必须带 cpuModel，且与核数同一条目派生。
+func TestDesktopFingerprintHasCPUModel(t *testing.T) {
+	c := &Client{}
+	a := &auth.Auth{UID: "u-fp", Nickname: "n"}
+	fp := c.desktopFingerprint(a)
+	_, _, _, wantModel := desktopHardware(a)
+	if got := fp["cpuModel"]; got != wantModel {
+		t.Errorf("cpuModel=%v want %v", got, wantModel)
+	}
+	if fp["cpuCores"] == nil || fp["memorySize"] == nil || fp["osVersion"] == nil {
+		t.Error("硬件三件套不应因新增 cpuModel 而丢失")
+	}
+}
+
+// TestSetDomainHeaderBareHost X-Domain 必须是裸主机名（官方 29 处全部 auth.domain），
+// 不能是带 scheme 的完整 URL；域为空时不发这个头（官方 `r.domain &&` 的写法）。
+func TestSetDomainHeaderBareHost(t *testing.T) {
+	h := http.Header{}
+	setDomainHeader(h, &auth.Auth{Domain: "www.codebuddy.cn"})
+	if got := h.Get("X-Domain"); got != "www.codebuddy.cn" {
+		t.Errorf("X-Domain=%q want www.codebuddy.cn", got)
+	}
+	if strings.Contains(h.Get("X-Domain"), "://") {
+		t.Error("X-Domain 不该带 scheme（此前发的是完整 URL）")
+	}
+	h2 := http.Header{}
+	setDomainHeader(h2, &auth.Auth{})
+	if _, ok := h2["X-Domain"]; ok {
+		t.Error("域为空时不该发 X-Domain")
 	}
 }
