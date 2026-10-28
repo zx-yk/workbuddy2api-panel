@@ -37,12 +37,42 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.4-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.5-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.5 · 2026-10-28
+
+四条小范围修复：一条影响客户端重试体验（排队错误），一条影响模型冷冻的实际锁定时长，
+两条收敛请求体清洗的边界。无配置变更，替换二进制即可。
+
+- **6020/6021 渠道排队改回「请求内轮转 + 429」**：此前按 fail-fast 回 503，等于把上游的
+  「稍后再试」翻译成「服务不可用」——上游对这两个形态本身回的就是 429（6020 还带
+  `data.retry_after`），社区同日实案里官方 CLI 收到 503 会中断任务、收到 429 才按
+  `Retry-After` 重试。现恢复轮转（排队可用性是间歇的，同一分钟内既有满载也有成功），
+  轮转耗尽后回 **429 + `Retry-After`**：等待口径优先取上游 body 的 `data.retry_after`，
+  缺省 5 秒，上限 10 分钟挡脏值。**「渠道排队不罚账号」的原则不变**（不冷却 / 不熔断 /
+  不喂连败），绑定号撞上排队时本轮即使用其他账号代理成功也不改绑。
+- **账号级冷却不再清模型级冷冻**：两者是正交维度。此前账号在某个模型上吃一次 429，会把
+  其他模型「锁到上游重置墙钟」的冷冻一并抹掉，账号冷却到期后立刻再撞同一堵墙（多号池的
+  典型表现：提示某时刻恢复，两小时后又被选中并再撞一次）。账号级冷却期间「整号不可选」
+  的语义由选号判定（`healthyForModel` / `modelExempt`）保证，不依赖清空模型冷冻。
+- **请求体清洗作用域收窄到身份域消息**：仅 `system` / `developer` / `assistant` 做身份句与
+  模板句改写；`user` / `tool` / `function` 里的同样内容属用户数据（粘贴的提示词、工具读到的
+  文件内容），除反探测串与 header 键名外**逐字不动**。顺带修掉一个隐性问题：原来只要命中
+  特征预检就会对整段文本 `TrimSpace`，会悄悄改动用户内容的空白。
+- **身份改写串去掉 AI 字样**：身份句被改写时用的占位句从 `You are a helpful AI assistant.` 改为 `You are a helpful assistant.`。
+  这一条需要标注证据等级：本次用「同一 body 只改这一处」的真机 A/B 对照复核过，
+  **旧串在实测中并未被上游拦截**（两个模型各一组，均 200，回复内容一致），
+  所以它属**低成本兜底而非已验证的修复**；保留的理由是代价不对称——若被拦是整单失败，
+  若不拦也没有副作用。
+
+回归：`go test ./...` 与 `go test -race ./...` 全绿；新增「排队轮转 + 429」「账号冷却与模型
+冷冻正交」「反探测串全角色」「身份域作用域」等用例；清洗层在隔离环境用抓包核对了出站
+body（`user` 逐字一致、`system` / `assistant` 被改写），并做真上游调用确认无回归。
 
 ### v1.16.4 · 2026-10-28
 
@@ -550,7 +580,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.4` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.5` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -562,17 +592,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.4-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.4-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.4-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.4-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.4-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.5-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.5-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.5-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.5-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.5-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.4
+V=1.16.5
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
