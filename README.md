@@ -37,12 +37,47 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.6-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.7-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.7 · 2026-10-30
+
+四条：一条缩短模型级冷冻的实际锁定时长，一条对齐客户端会话 ID 形态，两条重做快过期积分的
+加权方式。无配置变更，替换二进制即可（`pool.expiring_soon` 语义不变，仍为主窗口）。
+
+- **11102 负缓存 TTL 从 6h/24h 收到 15m/2h**：11102「service info not found」不总是
+  「这个账号确实没有这个模型」——路径级差异、上游瞬时抖动、分类误判都会给同一个码，
+  实测同一账号两分钟内就能恢复。旧参数把一次误判放大成 (账号, 模型) 锁死 6 小时起，
+  几个账号先后误判就是该模型整池不可用数小时，而客户端看到的还是 `model_unavailable`
+  （「换个模型」）这个错误结论。15 分钟让误判自愈快 24 倍，同时把「确实没有该模型」
+  的探测成本压在 12 次/天（更短的 2 分钟方案是 144 次/天，每次都是白撞一轮 400）；
+  上限 2 小时是为了跟上模型权限变化，又不至于一天只探一次。**存量条目在恢复时会被
+  钳到新上限**，不用等旧值自然到期。
+- **派生的会话 ID 改为 UUIDv7 形态**：官方 CLI 内核断言 `conversationRequestId` 必须是
+  「32 位小写 UUIDv7」，而本项目的会话 ID 是摘要派生的，版本位天然随机（实测发出去是
+  `ver=8/9/a`）。现改为「摘要映射出伪时间 + 版本位 7 + RFC 4122 变体」——仍是确定性
+  派生，同一会话每轮同值、缓存槽不漂移，只是形态对齐。副作用：会话键值变化会让存量
+  粘性绑定重新分配一次（绑定只是账号偏好，不丢状态）。
+- **快过期积分按紧迫度分五档加权**：此前的做法是「窗口内有到期批次就一律 ×3」，而乘法
+  是相对每个账号自身余额做的，绝对权重仍由余额决定——命中账号一多，最早到期的那几个
+  反而进不了 top5 短名单。现按紧迫度排名取阶梯：第 1..5 名 **×8 / ×6 / ×5 / ×4 / ×3**，
+  第 6 名及以后仍 ×3（不降权）。排名键为最早到期时间升序，同一时刻按该批剩余量降序
+  （浪费得多的先花）。排名只看池内状态、不看本次请求的试用与在途，使同一时刻所有请求
+  看到同一名次；新会话的候选展开与换号抽签共用同一份名次。
+- **主窗口内没有到期积分时自动放宽到 14 天**：官方批次常是「同一波签到、十几天后同批
+  到期」，7 天主窗口在批次中段会整段为空——此时快过期偏好完全失效，等批次真的进入
+  7 天窗口才开始加权，剩下的时间又不够花完。现在该域主窗口一个到期批次都没有时，自动
+  用 14 天再排一次；主窗口一有账号进入立刻切回。回退按域独立判定，一个域的批次不会把
+  另一个域锁在窄窗口里。
+
+回归：新增 6 个用例（阶梯数值、紧迫度排名与倍数、同一时刻按剩余量/uid 兜底、14 天回退
+与切回、回退按域独立、关闭偏好后权重退化）；TTL 与候选展开测试同步更新。回退与阶梯
+两条都做过**反向验证**——关掉回退、或把阶梯全设成 3，对应断言必须失败。
+`go test ./...` 与 `go test -race ./...` 全绿。
 
 ### v1.16.6 · 2026-10-29
 
@@ -601,7 +636,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.6` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.7` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -613,17 +648,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.6-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.6-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.6-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.6-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.6-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.7-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.7-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.7-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.7-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.7-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.6
+V=1.16.7
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
