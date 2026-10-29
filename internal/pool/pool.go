@@ -66,6 +66,11 @@ type Pool struct {
 	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
 	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
 	preferExpiring bool
+	// expiringWindow 快过期主窗口（config pool.expiring_soon，默认 168h=7 天）。
+	// 与 scheduler 查余额时用的窗口同源：签到/刷新时 upstream 按它算 creditsExpiring。
+	// 选号侧从按日批次自行按任意窗口求和（见 creditsExpiringWithin），因此这里还要
+	// 用于「主窗口无积分 → 放宽回退窗口」的判定。
+	expiringWindow time.Duration
 	// crossDomainFallback 裸模型名跨域回退开关（默认 false = 零回归，issue #135）。
 	// 仅由选号调用方（server handler）读取：开启后，未带 realm 前缀的请求在首选域
 	// 选不到可用号时改用另一域再选一次；显式 cn:/global: 前缀不受影响。
@@ -107,6 +112,7 @@ func New(stateFp string) *Pool {
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
 		preferExpiring:     true,
+		expiringWindow:     defaultExpiringWindow,
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -205,6 +211,17 @@ func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetExpiringWindow 注入快过期主窗口（main 从 pool.expiring_soon 解析后调用）。
+// 0 或负数 = 关闭快过期加权（与 prefer_expiring=false 等效），不 panic。
+func (p *Pool) SetExpiringWindow(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.expiringWindow = d
 }
 
 // SetCrossDomainFallback 注入裸模型名跨域回退开关（issue #135；false = 零回归）。

@@ -90,7 +90,11 @@ func TestFairnessDoesNotBreakExpiryPreference(t *testing.T) {
 	p.byUID["expiring"].creditsEarliestExpiry = now.Add(24 * time.Hour)
 	p.mu.Unlock()
 
-	got := p.routingWeightOf(p.byUID["expiring"], 100, now)
+	p.mu.Lock()
+	rank := p.expiringRankLocked(now, p.expiringWindowLocked(now, ""), "")
+	p.mu.Unlock()
+
+	got := p.routingWeightOf(p.byUID["expiring"], 100, now, rank["expiring"])
 	base := p.weightOf(p.byUID["expiring"], 100, now)
 	if got <= base {
 		t.Fatalf("expiry preference must remain a multiplier on load fairness: weight=%v base=%v", got, base)

@@ -1893,18 +1893,25 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
 
 	p.mu.Lock()
-	we := p.routingWeightOf(p.byUID["a"], 100, now)
-	wn := p.routingWeightOf(p.byUID["b"], 100, now)
+	rank := p.expiringRankLocked(now, p.expiringWindowLocked(now, ""), "")
 	p.mu.Unlock()
-	if we != wn*expiringVirtualSlots {
-		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
+	if rank["a"] != 1 || rank["b"] != 0 {
+		t.Fatalf("rank=%v want a=1（窗口内唯一快过期号）b=0", rank)
+	}
+
+	p.mu.Lock()
+	we := p.routingWeightOf(p.byUID["a"], 100, now, rank["a"])
+	wn := p.routingWeightOf(p.byUID["b"], 100, now, rank["b"])
+	p.mu.Unlock()
+	if we != wn*expiringLadder[0] {
+		t.Fatalf("enabled expiring weight=%v want %v（第 1 名 ×%v）", we, wn*expiringLadder[0], expiringLadder[0])
 	}
 
 	p.SetPreferExpiring(false)
 
 	p.mu.Lock()
-	wa := p.routingWeightOf(p.byUID["a"], 100, now)
-	wb := p.routingWeightOf(p.byUID["b"], 100, now)
+	wa := p.routingWeightOf(p.byUID["a"], 100, now, rank["a"])
+	wb := p.routingWeightOf(p.byUID["b"], 100, now, rank["b"])
 	p.mu.Unlock()
 	if wa != wb {
 		t.Fatalf("disabled expiring weights differ: %v/%v", wa, wb)

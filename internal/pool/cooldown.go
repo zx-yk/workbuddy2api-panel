@@ -331,21 +331,25 @@ func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 	p.dirty.Store(true)
 }
 
-// modelBlock TTL 常量（11102/11158 负缓存退避）：首次 2m，之后 base × 2^min(hits-1, 4)，
-// 封顶 10m。该模型请求成功即由 BlockModelClear 清除。
+// modelBlock TTL 常量（11102/11158 负缓存退避）：首次 15m，之后 base × 2^min(hits-1, 4)，
+// 封顶 2h。该模型请求成功即由 BlockModelClear 清除。
 //
-// 为什么从 6h/24h 收到 2m/10m：11102「service info not found」**不总是**「这个号真没有
-// 这个模型」——路径级差异、上游瞬时抖动、分类误判都会给同一个码，实测同一账号两分钟就
-// 恢复。旧参数把一次误判放大成 (账号,模型) 锁死 6 小时：多号池里几个号先后误判，就是
+// 为什么从 6h/24h 收到 15m/2h：11102「service info not found」**不总是**「这个号真没有
+// 这个模型」——路径级差异、上游瞬时抖动、分类误判都会给同一个码，社区实测同一账号两分钟
+// 就恢复。旧参数把一次误判放大成 (账号,模型) 锁死 6 小时：多号池里几个号先后误判，就是
 // 该模型整池 400/503 好几个小时，且 ModelBlockedForRealm 会让客户端看到
-// model_unavailable（"换个模型"）——这个错误结论比等两分钟贵得多。
+// model_unavailable（"换个模型"）——这个错误结论比等十五分钟贵得多。
 //
-// shift=4 保留：2m × 16 = 32m > 10m，阶梯仍能走到封顶；真正的「没有这个模型」会自然
-// 收敛到 10 分钟一次探测，代价可接受。
+// 为什么不更短（曾试 2m/10m）：对**真的没有这个模型**的号，每次探测都是一轮白撞的 400。
+// 2m/10m 等于稳态每小时探 6 次（一天 144 次），几个号一起就是几百次噪音轮转；15m 把
+// 这项成本压到 1/12（一天 12 次），而误判自愈只比 2 分钟慢 13 分钟。上限 2h 同理：
+// 既要跟上模型目录/权限变化（上游放开权限后最多 2 小时就能用上），又不至于一天只探一次。
+//
+// shift=4 保留：15m × 16 = 4h > 2h，阶梯仍能走到封顶。
 const (
-	modelBlockBaseTTL = 2 * time.Minute
+	modelBlockBaseTTL = 15 * time.Minute
 	modelBlockShift   = 4
-	modelBlockMaxTTL  = 10 * time.Minute
+	modelBlockMaxTTL  = 2 * time.Hour
 )
 
 // BlockModelBackoff 11102「该后端无此模型」的 (账号, 模型) 负缓存入口

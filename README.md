@@ -854,8 +854,8 @@ export ANTHROPIC_API_KEY=your-api-key               # 走 x-api-key
 | `pool.strategy.domestic` | `weighted_random` | 国内版账号池调度：`weighted_random` / `round_robin` / `sequential_exhaust`，支持热更新 |
 | `pool.strategy.international` | `weighted_random` | 国际版账号池独立调度策略，同上；不改变既有地区路由 |
 | `pool.account_order.domestic` / `international` | `[]` | 对应地区的 UID 优先顺序；未列出账号按 UID 排序追加；只用于轮询和顺序耗尽 |
-| `pool.prefer_expiring` | `true` | 快过期积分加权：窗口内仍有有效快过期批次的账号，选号权重 ×3（虚拟实例）；不按到期时间排序、与批次金额无关；是软偏好，弱于会话粘性与模型成本分层（#101） |
-| `pool.expiring_soon` | `168h` | 快过期加权窗口：仅窗口内仍有有效批次的账号命中上述 ×3；窗口开大 → 命中账号变多、偏好被稀释；留空或 `0` 关闭 |
+| `pool.prefer_expiring` | `true` | 快过期积分加权：窗口内有到期批次的账号按**紧迫度排名**取阶梯权重（第 1..5 名 ×8/×6/×5/×4/×3，第 6 名及以后 ×3）；排名按最早到期时间升序、同刻按该批剩余量降序；是软偏好，弱于会话粘性与模型成本分层 |
+| `pool.expiring_soon` | `168h` | 快过期加权**主窗口**：仅窗口内有到期批次的账号参与上述排名；窗口开大 → 命中账号变多、偏好被稀释；留空或 `0` 关闭。该域内主窗口无任何到期批次时，选号自动放宽到 **14 天**再排（回退，避免批次中段偏好整段失效） |
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
@@ -962,7 +962,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 2. 按模型实测成本分层，只保留当前最优层
 3. 默认开启快过期积分加权（软偏好，不改排序）：
 
-   - 在模型成本最优层内，`expiring_soon` 窗口内仍有有效快过期批次的账号，选号权重 ×3（`expiringVirtualSlots` 虚拟实例展开，会话粘性路径同口径）。
+   - 在模型成本最优层内，`expiring_soon` 窗口内有到期批次的账号按紧迫度排名取阶梯权重（第 1..5 名 ×8/×6/×5/×4/×3，第 6 名及以后 ×3）；新会话的候选列表按同一档位展开重复项，会话粘性路径同口径。该域主窗口无批次时窗口回退到 14 天。
    - 不按到期时间排序、与批次金额无关：14 天后到期与 3 天后到期、1 分与几千分，只要在窗口内待遇相同。
    - 该偏好弱于会话粘性（绑定号健康则直接使用）与模型成本分层（按实测成本硬过滤）；已过期、零余额、无有效到期时间的账号不进入加权集。
 4. 同一候选池内加权随机（快过期命中账号在上面的基础上 ×3）：

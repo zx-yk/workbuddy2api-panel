@@ -7,19 +7,25 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// TestModelBlockTTLShortEnoughToSelfHeal 11102/11158 负缓存的 TTL 必须短到能自愈。
+// TestModelBlockTTLShortEnoughToSelfHeal 11102/11158 负缓存的 TTL 必须短到能自愈，
+// 同时不能短到把「真的没有这个模型」的号变成探测风暴。
 //
 // 回归背景：11102「service info not found」不总是「这个号真没有这个模型」——路径级差异、
-// 上游瞬时抖动、分类误判都会给同一个码，实测同一账号两分钟就恢复。旧参数是 6h 基数 /
+// 上游瞬时抖动、分类误判都会给同一个码，社区实测同一账号两分钟就恢复。旧参数是 6h 基数 /
 // 24h 上限，一次误判就把 (账号,模型) 锁死半天，几个号先后误判就是该模型整池不可用。
 //
-// 四条区间断言（微调到 3m/12m 也不会红），并钉住「阶梯仍能走到封顶」。
+// 上限 15m / 2h 的取舍：15m 让误判自愈只比 2 分钟慢 13 分钟，而把「每次探测都白撞一轮
+// 400」的稳态成本从 2m 方案的 144 次/天压到 12 次/天；2h 既跟得上模型权限变化，又不至于
+// 一天只探一次。
 func TestModelBlockTTLShortEnoughToSelfHeal(t *testing.T) {
-	if modelBlockBaseTTL > 3*time.Minute {
-		t.Errorf("modelBlockBaseTTL=%v 太长（上限 3m）", modelBlockBaseTTL)
+	if modelBlockBaseTTL > 15*time.Minute {
+		t.Errorf("modelBlockBaseTTL=%v 太长（上限 15m：误判要能在一刻钟内自愈）", modelBlockBaseTTL)
 	}
-	if modelBlockMaxTTL > 12*time.Minute {
-		t.Errorf("modelBlockMaxTTL=%v 太长（上限 12m）", modelBlockMaxTTL)
+	if modelBlockMaxTTL > 2*time.Hour {
+		t.Errorf("modelBlockMaxTTL=%v 太长（上限 2h：上游放开权限后最多等这么久）", modelBlockMaxTTL)
+	}
+	if modelBlockBaseTTL < 10*time.Minute {
+		t.Errorf("modelBlockBaseTTL=%v 太短（下限 10m：再短就是每小时多次白撞探测）", modelBlockBaseTTL)
 	}
 	if modelBlockBaseTTL >= modelBlockMaxTTL {
 		t.Errorf("基数 %v 必须小于封顶 %v", modelBlockBaseTTL, modelBlockMaxTTL)
@@ -28,7 +34,7 @@ func TestModelBlockTTLShortEnoughToSelfHeal(t *testing.T) {
 		t.Errorf("阶梯末级 %v 未超过封顶 %v（shift=%d 失效）", got, modelBlockMaxTTL, modelBlockShift)
 	}
 
-	// 首次命中写 2 分钟左右的 Until，而不是 6 小时。
+	// 首次命中写 15 分钟左右的 Until，而不是 6 小时。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.BlockModelBackoff("u1", "m1", "11102 model [m1] service info not found")
@@ -47,7 +53,7 @@ func TestModelCooldownsRestoreClampsStaleBackoff(t *testing.T) {
 	now := time.Now()
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	// 11102 退避条目（本次会写 ~2m，稍后篡改成旧版本的 6h）。
+	// 11102 退避条目（本次会写 ~15m，稍后篡改成旧版本的 6h）。
 	p.BlockModelBackoff("u1", "m-backoff", "11102 model [m-backoff] service info not found")
 	// 6004 条目：上游墙钟 6 小时后。
 	p.CooldownSoftForModel("u1", time.Minute, now.Add(6*time.Hour), "m-quota", "6004 model rate limit")
