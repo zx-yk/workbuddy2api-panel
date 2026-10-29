@@ -190,6 +190,12 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// DebugLogOutboundBody 4xx 时把出站请求体写进日志（默认 false）。
+		//
+		// 排障专用：上游 400 的原因（stop 类型、工具配对、参数超范围）几乎只在出站
+		// 请求体里看得出来，而日志默认只有上游回包。body 里含用户内容，所以默认关闭、
+		// 由使用者显式打开；写日志前会剥掉 data URL 的 base64 内容并截断长度。
+		DebugLogOutboundBody bool `json:"debug_log_outbound_body"`
 	} `json:"features"`
 
 	Models struct {
@@ -335,7 +341,8 @@ func Default() *Config {
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
-	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
+	c.Features.DebugLogOutboundBody = false // 排障开关：默认关闭（含用户内容）
+	c.Prompt.Mode = "passthrough"           // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.Strategy = pool.RegionStrategies{Domestic: pool.WeightedRandom, International: pool.WeightedRandom}
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
@@ -497,6 +504,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
+		}
+	}
+	if v := os.Getenv("WB2A_DEBUG_LOG_OUTBOUND_BODY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Features.DebugLogOutboundBody = b
 		}
 	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {

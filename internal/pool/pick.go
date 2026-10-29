@@ -331,6 +331,14 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
+		if e.modelCooled(now, model) {
+			// 模型级冷冻（6004 / 11102）只写 modelCooldowns、不写账号级 until，而兜底
+			// 候选只看 expiry：不判这一条，一个「账号级冷却残留 + 该模型冷冻」的号会被
+			// 兜底捞回来，集中打一次必然 429 的请求。v1.16.5 起账号级冷却不再清模型
+			// 冷冻，这个组合从「几乎不可能」变成峰值时的常态，必须在最后一道选号路径
+			// 挡住——前面挡不住就等于没挡。
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}

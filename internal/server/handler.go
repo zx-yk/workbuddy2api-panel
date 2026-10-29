@@ -80,6 +80,10 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// DebugLogOutboundBody 4xx 时把出站请求体写进日志（排障开关，缺省 false）。
+	// 来自 features.debug_log_outbound_body；Live 非空时以热更新快照为准。
+	DebugLogOutboundBody bool
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -88,10 +92,11 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		return h.cfg.Live.Load()
 	}
 	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
-		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		APIKey:               h.cfg.APIKey,
+		SoftCooldown:         h.cfg.SoftCooldown,
+		RecordClientInfo:     h.cfg.RecordClientInfo,
+		DebugLogOutboundBody: h.cfg.DebugLogOutboundBody,
+		HiddenModels:         livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
 	}
 }
 
@@ -872,6 +877,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// 4xx 排障日志：请求结束时把**最后一次实际发出的**出站 body 写进日志（仅当
+	// features.debug_log_outbound_body 打开且最终状态是 4xx）。挂在这里而不是每个
+	// 400 出口，是因为 4xx 有六七个返回点，逐个加必然漏。
+	if h.loadLive().DebugLogOutboundBody {
+		defer func() { h.logOutboundOn4xx(st, body) }()
+	}
+
 	timeoutRotateExtra := h.cfg.TimeoutRotateExtra
 	// stickyOverflow 表示本次只是从满载的绑定号临时溢出；成功后不改绑。
 	stickyOverflow := false
@@ -1387,6 +1399,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 调用方已断开（ctx 取消 / 服务停机）：这不是「上游解析失败」。
+			// 三个动作都不能做：不 fail（fail 会解绑粘性，把人自己取消的请求记成
+			// 账号问题）、不记 502（人已走，502 观测没有意义）、不写响应。
+			// 只留 499 给可观测（nginx 的 client-closed-request 口径）。
+			if r.Context().Err() != nil {
+				// 真的写一次 499：请求日志与面板的 status 取自实际写出的 HTTP 状态
+				// （responseObserver），只改 st.status 会显示成 200。客户端通常已经走了，
+				// 写失败也无害；连接还在时（例如服务停机）对方拿到的是明确的非 2xx。
+				st.status = statusClientClosedRequest
+				st.outcome = reqlog.OutcomeInterrupted
+				w.WriteHeader(statusClientClosedRequest)
+				return
+			}
 			fail(acct.UID)
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
@@ -1458,6 +1483,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （限流语义、客户端应等待重试），其余保持 503。本地调度类错误（无可用账号/
 	// 传输层抖动/非上游返回的 lastErr）→ 保留自有文案 no_healthy_account（本地错误
 	// 没有上游原文可透传，不编造）。
+	// 轮转耗尽时调用方已断开：同上，记 499 而不是「所有账号都不可用」——
+	// 后者会让人以为池子挂了，实际上是被调方主动取消。
+	if r.Context().Err() != nil {
+		st.status = statusClientClosedRequest
+		st.outcome = reqlog.OutcomeInterrupted
+		w.WriteHeader(statusClientClosedRequest) // 理由同非流式聚合分支：status 取实际写出的值
+		return
+	}
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
@@ -1726,6 +1759,12 @@ func isConnectError(err error) bool {
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "tls handshake timeout")
 }
+
+// statusClientClosedRequest 调用方主动断开（nginx 的非标准 499 口径）。
+// Go 的 net/http 没有这个常量：它不是 HTTP 语义状态，而是给日志/观测用的标记，
+// 用来把「人走了」和「上游/网关出错」分开——否则取消的请求会被记成 502/503，
+// 运维看到的是假故障。
+const statusClientClosedRequest = 499
 
 // maxRetryAfter Retry-After 头的本地上限：容量/排队类错误的等待口径是上游
 // 「预计如此」，脏值或时钟漂移会把天文数字带进头里；给客户端一个上界，避免

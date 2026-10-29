@@ -1018,6 +1018,34 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 //   - 账号级冷却到期后，(账号, 模型) 的 6004 冷冻仍在——不会被「账号在别的模型上
 //     吃一次 429」抹掉，否则解冻后立刻再撞同一模型的限流墙（多号池里的典型表现：
 //     提示 15:22 恢复，2h 后又撞一次 6004）。
+//
+// TestFallbackHonorsModelCooldown 全冷却兜底必须遵守模型级冷冻（A1）。
+//
+// 回归背景：模型级冷冻（6004/11102）只写 modelCooldowns、不写账号级 until，而
+// pickEarliestExpiryLocked 的候选只看 expiry。于是「账号级冷却残留 + 该模型冷冻」的
+// 号会被兜底选中，集中打一次必然失败的请求。v1.16.5 起账号级冷却不再清模型冷冻，
+// 这个组合从罕见变成常见，所以必须在兜底这一层也挡住。
+//
+// 注意：必须让账号另有**非零 expiry**才会进入兜底候选。只挂模型冷冻时 expiry 为空，
+// 旧代码同样不选——那种写法测出来是假绿。
+func TestFallbackHonorsModelCooldown(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	// 账号级软冷却：expiry 非零 → 唯一账号进入兜底候选。
+	p.Cooldown("u1", CoolSoft, 10*time.Minute, "429 rate limit")
+	// 同一账号该模型被上游锁到 30 分钟后。
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(30*time.Minute), "kimi-k3.1-pro", "6004")
+
+	if got := p.PickExcludingForModel(nil, "kimi-k3.1-pro"); got != nil {
+		t.Fatalf("兜底绕过了模型级冷冻，会打一次必然失败的请求: %+v", got)
+	}
+	// 其他模型不受牵连：兜底照常选中（账号级冷却中最先到期的那个）。
+	if got := p.PickExcludingForModel(nil, "deepseek-v4.1-flash"); got == nil || got.UID != "u1" {
+		t.Fatalf("模型冷冻不得外溢成整号不可兜底, got %+v", got)
+	}
+}
+
 func TestAccountCooldownKeepsModelFreeze(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
