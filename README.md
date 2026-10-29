@@ -37,12 +37,33 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.5-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.6-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.6 · 2026-10-29
+
+三条都属于「看日志才发现」的类型。无破坏性变更；只新增一个默认关闭的排障开关。
+
+- **全冷却兜底遵守模型级冷冻**：模型冷冻（6004 / 11102）只写「(账号, 模型)」维度，
+  不写账号级冷却，而兜底选号只按「谁最早到期」挑号。于是「账号级冷却残留 + 该模型
+  冷冻」的号会被兜底捞回来，集中打一次必然 429 的请求。上一版让账号级冷却不再清模型
+  冷冻之后，这个组合从罕见变成峰值时的常态——最后一道选号路径不判，前面判了也白判。
+- **调用方断开改记 499**：客户端取消（或服务停机）时，非流式路径此前报 `502
+  upstream_parse`、轮转耗尽报 `503 no_healthy_account`，两者都会让人以为是上游或号池
+  出了问题。现统一记 499 + `outcome=interrupted`，并且**不把这次失败算到账号头上**
+  （不解绑会话粘性）。499 是 nginx 的非标准口径，只用于观测，不参与任何调度决策。
+- **新增 `features.debug_log_outbound_body`（默认关闭）**：打开后 4xx（**排除 429**）
+  把出站请求体写进日志。上游 400 往往只回一句「参数不合法」，真正的原因（`stop`
+  类型、工具配对、参数越界）只在出站 body 里。写入前剥掉 data URL 的 base64 内容、
+  按字符边界截断到 4KB，避免图片与长上下文进日志。可用环境变量
+  `WB2A_DEBUG_LOG_OUTBOUND_BODY` 覆盖，面板保存后热生效。
+
+回归：新增 5 个用例（兜底遵守冷冻、499 两种取消时机、4xx 记与不记、base64 脱敏、
+截断边界）；兜底与 499 两条都做了**反向验证**——把修复关掉，对应测试必须失败。
 
 ### v1.16.5 · 2026-10-28
 
@@ -580,7 +601,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.5` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.6` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -592,17 +613,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.5-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.5-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.5-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.5-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.5-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.6-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.6-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.6-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.6-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.6-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.5
+V=1.16.6
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
@@ -813,6 +834,7 @@ export ANTHROPIC_API_KEY=your-api-key               # 走 x-api-key
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
+| `features.debug_log_outbound_body` | `false` | 4xx（不含 429）把**出站请求体**写进日志，排障用。写入前剥掉 data URL 的 base64 内容并截断到 4KB；含用户内容，默认关闭 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
@@ -861,7 +883,7 @@ export ANTHROPIC_API_KEY=your-api-key               # 走 x-api-key
 客户端（Claude Code / Codex 等 CLI）会在 system prompt 注入固定模板句，上游内容审核按**逐字精确匹配**误杀合法流量（HTTP 400 + 审核文案）。网关提供两层防护，互不替代：
 
 1. **提示词体系**（解决 **system / developer 来源**的误报）：由 `prompt.mode` 控制
-2. **指纹脱敏**（兜底 **用户 / assistant 消息**里的指纹串）：由 `features.sanitize_blacklist_fingerprints` 控制
+2. **指纹脱敏**（兜底 **system / developer / assistant 消息**里的指纹串）：由 `features.sanitize_blacklist_fingerprints` 控制。`user` / `tool` 里的同一句属用户数据，除反探测串与 header 键名外**逐字不动**
 
 | 模式 | 语义 |
 |---|---|
@@ -1201,7 +1223,7 @@ http://127.0.0.1:7863/panel/
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
-**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
+**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、`features.debug_log_outbound_body`、
 `models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
@@ -1443,7 +1465,7 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 
 ### 系统提示词被内容策略误杀怎么办？
 
-默认 `prompt.mode=custom` 已用网关自有提示词替换客户端 system，从源头消除大部分误报；用户 / assistant 消息中的指纹串由 `features.sanitize_blacklist_fingerprints` 清洗，两层叠加。`passthrough` 模式下首遇拦截会自动换 Degraded 中性提示词同请求重试一次。
+默认 `prompt.mode=custom` 已用网关自有提示词替换客户端 system，从源头消除大部分误报；system / developer / assistant 消息中的指纹串由 `features.sanitize_blacklist_fingerprints` 清洗（`user` / `tool` 属用户数据，不改写），两层叠加。`passthrough` 模式下首遇拦截会自动换 Degraded 中性提示词同请求重试一次。
 
 ### 如何让官网「使用端」列显示为 WorkBuddy？
 
