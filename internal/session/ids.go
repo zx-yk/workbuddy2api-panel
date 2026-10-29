@@ -10,11 +10,13 @@ package session
 import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"time"
 )
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
@@ -47,10 +49,47 @@ func ResolveConversationID(body []byte) string {
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
 // X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
 // math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。
+// v7Epoch / v7Window 派生 ID 的「伪时间」锚点与窗口（约 13 个月）。
+//
+// 官方客户端用 uuidv7 生成这些 ID（CLI 内核里 `assertClientConversationRequestId`
+// 断言 "conversationRequestId must be a lowercase UUIDv7 encoded as 32 hexadecimal
+// characters"，且依赖 `uuidv7` 包），而我们这边的会话 ID 是 sha256 派生或随机生成的，
+// 天然没有版本位——抓包实测我们发出的是 `ver=8/9/a`，与官方不一致。
+//
+// 只把版本位改成 7 还不够：v7 的前 48 bit 是毫秒时间戳，直接沿用随机字节会落在
+// 1970～10889 年，比「版本位不对」更离谱。这里用摘要自身的字节映射到
+// [锚点, 锚点+窗口) 的毫秒值——**确定性**（同一会话每轮同值，缓存槽不漂移），
+// 且落在合理区间。
+var v7Epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+const v7Window = 400 * 24 * time.Hour
+
+// stampV7 把 16 字节摘要改写成 UUIDv7 形态的 32 位小写 hex：
+// 前 48 bit 为伪时间、第 13 个 hex 位固定 7、第 17 个 hex 位高两位固定 10（RFC 4122 变体）。
+// 长度不是 16 时原样 hex 编码（防御：调用方都传 16 字节，但不 panic）。
+func stampV7(b []byte) string {
+	if len(b) != 16 {
+		return hex.EncodeToString(b)
+	}
+	ms := binary.BigEndian.Uint64(b[:8]) % uint64(v7Window/time.Millisecond)
+	ts := uint64(v7Epoch.UnixMilli()) + ms
+	var out [16]byte
+	copy(out[:], b)
+	out[0] = byte(ts >> 40)
+	out[1] = byte(ts >> 32)
+	out[2] = byte(ts >> 24)
+	out[3] = byte(ts >> 16)
+	out[4] = byte(ts >> 8)
+	out[5] = byte(ts)
+	out[6] = (out[6] & 0x0F) | 0x70 // version 7
+	out[8] = (out[8] & 0x3F) | 0x80 // variant RFC 4122
+	return hex.EncodeToString(out[:])
+}
+
 func NewMessageID() string {
 	b := make([]byte, 16)
 	if _, err := cryptorand.Read(b); err == nil {
-		return hex.EncodeToString(b)
+		return stampV7(b)
 	}
 	// 熵源故障的极端兜底：仍保证 32 hex（fallbackID 不 panic、不空串）。
 	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
@@ -87,7 +126,7 @@ func RequestIDForKey(key string) string {
 		return NewMessageID()
 	}
 	sum := sha256.Sum256([]byte(deriveSalt + "|" + key))
-	return hex.EncodeToString(sum[:16])
+	return stampV7(sum[:16])
 }
 
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的
@@ -237,5 +276,5 @@ func TurnRequestID(turnKey string) string {
 		return NewMessageID()
 	}
 	sum := sha256.Sum256([]byte(deriveSalt + "|" + turnKey))
-	return hex.EncodeToString(sum[:16])
+	return stampV7(sum[:16])
 }

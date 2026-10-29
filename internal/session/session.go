@@ -11,7 +11,6 @@ package session
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"log"
 	"strings"
@@ -465,7 +464,11 @@ func deriveKey(obj map[string]any) string {
 		return "" // 无用户消息：无从归属会话
 	}
 	sum := sha256.Sum256([]byte(systemText + "\x00" + firstUserText))
-	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
+	// 打 UUIDv7 版本位：这个键会派生 X-Conversation-ID（d-<hex> → UUID 形态），
+	// 官方客户端要求 v7（CLI 内核断言），未打点的话版本位是 sha256 的随机一位。
+	// 注意：本键同时是粘性绑定的 key，值变化会让存量绑定重新分配一次（一次性，
+	// 无状态丢失——绑定只是账号偏好）。
+	return derivedKeyPrefix + stampV7(sum[:16])
 }
 
 // userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**

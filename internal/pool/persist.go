@@ -207,6 +207,14 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				if mc.Until.IsZero() || !now.Before(mc.Until) {
 					continue
 				}
+				// 存量钳制：11102/11158 是退避式负缓存，旧版本写的是 6h 基数 / 24h 上限。
+				// 常量收窄后如果不动存量，升级要等这些条目自然到期才生效（最长 24 小时）。
+				// 6004 是上游重置墙钟语义，绝不碰。
+				if modelBlockReason(mc.Reason) {
+					if cap := now.Add(modelBlockMaxTTL); mc.Until.After(cap) {
+						mc.Until = cap
+					}
+				}
 				if e.modelCooldowns == nil {
 					e.modelCooldowns = map[string]modelCooldown{}
 				}
