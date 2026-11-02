@@ -37,12 +37,39 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.9-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.10-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.10 · 2026-11-03
+
+承接上一版的三条后续：少打无用请求、让状态自愈。无配置变更，替换二进制即可。
+
+- **自动任务改用阶段 0 的任务列表快照**：逐项执行时不再为每一项重新拉一次列表，而是
+  用批量接受阶段拿到的那份列表判断「有没有这个任务、是否已经完成」。此前每项在动作前后
+  各读一次（动作后为了看异步进度还要轮询），一轮几十次列表查询会挤在几秒内——同类实现
+  有「17 个任务 24 次列表查询直接撞 429」的实证。快照只用于**执行前**的判断，动作后的
+  进度仍必须回读；列表那一次就失败时会退化为逐项回读，宁可多打一次，也不能把整轮任务
+  误判成「该账号没有这些任务」。另外加了 800ms 项间间隔，把一批请求从「几秒内打满」拉
+  平成分钟级。
+- **11158 独立 24 小时负缓存**：11158（「该账号类型无此模型权限」）此前和 11102 共用
+  15 分钟起步的退避阶梯，每两小时就会对该模型再探测一次。11102 可能是路径差异或上游
+  抖动造成的误判，几分钟就能自愈，短退避是对的；11158 是授权属性（套餐不含该模型），
+  短时间内不会变，反复探测只是在打注定失败的请求。现改为固定 24 小时——不设永久是为了
+  让续费或权限放开之后能自行恢复，不必人工干预。持久化恢复时的存量记录同步按码取上限。
+- **会话失效账号自动复核**：因 12153 / refresh session dead 被禁用的账号，每 6 小时用
+  一次轻量余额查询复核；成功即恢复选号，失败则把下次尝试推后一个窗口。此前一旦被判死
+  就只能人工恢复，可用容量会静悄悄少一格。只处理会话失效这一类——11140 是上游对账号
+  的显式限制（需申诉才能解除）、手动禁用是运维意图，两者都不自动探测：对已被限制的
+  账号高频探测，本身就是在加重信号。
+
+回归：新增 4 个用例（11158 与 11102 的时长分离、重复命中不拉长 11158；复核候选只包含
+会话失效且按窗口节流、旧状态文件缺时间戳时首次不探测但补写；快照命中时不回源）。三条
+都做过**反向验证**——把 11158 退回统一短 TTL、把候选查询的窗口去掉、把快照改成一律回源，
+对应断言必须失败。`go test ./...` 与 `go test -race ./...` 全绿。
 
 ### v1.16.9 · 2026-11-03
 
@@ -699,7 +726,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.9` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.10` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -711,17 +738,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.9-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.9-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.9-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.9-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.9-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.10-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.10-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.10-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.10-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.10-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.9
+V=1.16.10
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
