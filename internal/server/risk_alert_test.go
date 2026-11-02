@@ -40,7 +40,7 @@ func TestRiskSignalReportsChannelRefused(t *testing.T) {
 		return 400, `{"code":"11-128","msg":"request illegal"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up, Alert: alert.New(srv.URL, time.Hour)})
+	h := NewHandler(Config{Pool: p, Upstream: up, Alert: alert.New(srv.URL, "", time.Hour)})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
@@ -66,7 +66,7 @@ func TestRiskSignalIgnoresOrdinaryErrors(t *testing.T) {
 		return 429, `{"code":6004,"msg":"rate limited"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up, Alert: alert.New(srv.URL, time.Hour)})
+	h := NewHandler(Config{Pool: p, Upstream: up, Alert: alert.New(srv.URL, "", time.Hour)})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",

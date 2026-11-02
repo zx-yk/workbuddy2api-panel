@@ -11,7 +11,7 @@ import (
 
 // TestNewEmptyWebhookReturnsNil 未配 webhook 时返回 nil，调用方按 nil 短路。
 func TestNewEmptyWebhookReturnsNil(t *testing.T) {
-	if n := New("", 0); n != nil {
+	if n := New("", "", 0); n != nil {
 		t.Fatalf("空 webhook 应返回 nil，got %+v", n)
 	}
 }
@@ -50,7 +50,7 @@ func TestReportDeliversPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := New(srv.URL, time.Minute)
+	n := New(srv.URL, "tok-123", time.Minute)
 	if ok := n.Report("channel_refused", "标题", "细节"); !ok {
 		t.Fatal("首次上报应投递")
 	}
@@ -77,7 +77,7 @@ func TestReportDeduplicatesByKind(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := New(srv.URL, time.Hour)
+	n := New(srv.URL, "", time.Hour)
 	for i := 0; i < 5; i++ {
 		n.Report("waf_block", "t", "d")
 	}
@@ -93,7 +93,7 @@ func TestReportDeduplicatesByKind(t *testing.T) {
 
 // TestSendFailureDoesNotPanic 投递失败只记日志，绝不影响调用方（请求路径）。
 func TestSendFailureDoesNotPanic(t *testing.T) {
-	n := New("http://127.0.0.1:1/none", time.Hour) // 必然连不上
+	n := New("http://127.0.0.1:1/none", "", time.Hour) // 必然连不上
 	n.Report("k", "t", "d")
 	time.Sleep(300 * time.Millisecond) // 崩了会在这里被 -race/panic 捕获
 }

@@ -341,7 +341,7 @@ func main() {
 	// 未配 webhook 时为 nil，noteRiskSignal 走 nil 短路（零开销）。
 	var alerter *alert.Notifier
 	if cfg.Alert.Enabled {
-		alerter = alert.New(cfg.Alert.Webhook, time.Duration(cfg.Alert.MinIntervalSeconds)*time.Second)
+		alerter = alert.New(cfg.Alert.Webhook, cfg.Alert.Token, time.Duration(cfg.Alert.MinIntervalSeconds)*time.Second)
 		if alerter != nil {
 			log.Printf("alert: 风控信号告警已启用（静默窗口 %ds）", cfg.Alert.MinIntervalSeconds)
 		} else {

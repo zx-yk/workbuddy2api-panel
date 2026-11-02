@@ -222,10 +222,13 @@ type Config struct {
 	// 12153 session 失效 / 11140 渠道校验）推到 webhook，同类事件 30 分钟静默一次。
 	// 只做投递不做规则引擎：阈值与判定写在 server 侧的 noteRiskSignal 里。
 	Alert struct {
-		Enabled bool   `json:"enabled"`
-		// Webhook 投递地址。兼容 PushPlus（token 放 URL query，body 用 title/content），
-		// 也能被任意通用 webhook 消费。留空 = 不推送。
+		Enabled bool `json:"enabled"`
+		// Webhook 投递地址。通用 webhook 直接 POST JSON；PushPlus 填
+		// https://www.pushplus.plus/send 并把令牌写进 token 字段。留空 = 不推送。
 		Webhook string `json:"webhook"`
+		// Token 可选：随请求体一起发送。PushPlus 的 /send 要求 body 里带用户令牌；
+		// 通用 webhook 会忽略这个多余字段。
+		Token string `json:"token"`
 		// MinIntervalSeconds 同类事件的静默窗口（秒），缺省 1800（30 分钟）。
 		MinIntervalSeconds int `json:"min_interval_seconds"`
 	} `json:"alert"`

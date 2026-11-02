@@ -16,6 +16,7 @@ package alert
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -29,6 +30,7 @@ const defaultMinInterval = 30 * time.Minute
 // Notifier 风控信号投递器。零值不可用，用 New 构造；webhook 为空时全部方法无效。
 type Notifier struct {
 	webhook     string
+	token       string // 可选：PushPlus 这类服务要求 token 放在请求体里
 	minInterval time.Duration
 	client      *http.Client
 
@@ -38,7 +40,10 @@ type Notifier struct {
 
 // New 构造投递器。webhook 为空（或 enabled=false 时调用方不构造）返回 nil，
 // 调用方按 nil 安全短路。minInterval <= 0 时用默认 30 分钟。
-func New(webhook string, minInterval time.Duration) *Notifier {
+//
+// token 是可选的请求体字段：PushPlus 的 /send 要求 body 里带 token，
+// 而通用 webhook 会忽略多余字段，所以统一放进 body 而不是拼在 URL 上。
+func New(webhook, token string, minInterval time.Duration) *Notifier {
 	if webhook == "" {
 		return nil
 	}
@@ -47,6 +52,7 @@ func New(webhook string, minInterval time.Duration) *Notifier {
 	}
 	return &Notifier{
 		webhook:     webhook,
+		token:       token,
 		minInterval: minInterval,
 		client:      &http.Client{Timeout: 10 * time.Second},
 		last:        make(map[string]time.Time),
@@ -55,6 +61,9 @@ func New(webhook string, minInterval time.Duration) *Notifier {
 
 // payload 投递体。title/content 是 PushPlus 的字段名；kind/at 给通用 webhook 用。
 type payload struct {
+	// Token 仅 PushPlus 这类服务消费（它的 /send 要求 body 里带用户令牌）；
+	// 通用 webhook 忽略未知字段。空值时整个键不出现。
+	Token   string `json:"token,omitempty"`
 	Title   string `json:"title"`
 	Content string `json:"content"`
 	Kind    string `json:"kind"`
@@ -82,6 +91,7 @@ func (n *Notifier) Report(kind, title, detail string) bool {
 	n.mu.Unlock()
 
 	p := payload{
+		Token:    n.token,
 		Title:    title,
 		Content:  detail,
 		Kind:     kind,
@@ -104,9 +114,36 @@ func (n *Notifier) send(p payload) {
 		return
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode >= 300 {
-		log.Printf("WARN: [alert] send %s: HTTP %d", p.Kind, resp.StatusCode)
+		log.Printf("WARN: [alert] send %s: HTTP %d %s", p.Kind, resp.StatusCode, truncate(raw))
+		return
+	}
+	// PushPlus 这类服务业务失败也回 HTTP 200，只在体里给 code!=200：
+	// 不看这一层，推送失败会静默——而告警静默失败是最坏的一种失败。
+	if code, ok := bizCode(raw); ok && code != 200 {
+		log.Printf("WARN: [alert] send %s: 业务码 %d %s", p.Kind, code, truncate(raw))
 		return
 	}
 	log.Printf("alert: 已推送风控信号 kind=%s", p.Kind)
+}
+
+// bizCode 从响应体里取业务码（{"code":200,...} 形态）；非该形态返回 ok=false。
+func bizCode(raw []byte) (int, bool) {
+	var v struct {
+		Code *int `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Code == nil {
+		return 0, false
+	}
+	return *v.Code, true
+}
+
+// truncate 截断响应体用于日志（避免把整页 HTML 打进日志）。
+func truncate(b []byte) string {
+	s := string(b)
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
 }
