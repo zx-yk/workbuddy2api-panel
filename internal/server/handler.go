@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -84,6 +85,9 @@ type Config struct {
 	// DebugLogOutboundBody 4xx 时把出站请求体写进日志（排障开关，缺省 false）。
 	// 来自 features.debug_log_outbound_body；Live 非空时以热更新快照为准。
 	DebugLogOutboundBody bool
+
+	// Alert 风控信号投递器（可选；nil = 不告警）。构造在 main，配置改动需重启生效。
+	Alert *alert.Notifier
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -1219,6 +1223,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
 			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
+				// IP 级拦截是这里最严重的信号：不是某个号出问题，而是整个出口
+				// 被 WAF 盯上，所有账号都会连带失败。推到告警通道（同类 30 分钟静默）。
+				if n := h.cfg.Alert; n != nil {
+					n.Report("waf_ip_blocked",
+						"风控信号：出口 IP 级 WAF 拦截已激活（多号 60s 内接连 403，轮转已止损）",
+						"窗口内不同账号接连命中 403，说明拦的是 IP 不是账号；本轮已终止轮转。")
+				}
 				break
 			}
 			if !rotateBackoff(attempt-1, r.Context()) {
@@ -1813,7 +1824,54 @@ func retryAfterHeader(d time.Duration) string {
 // body 仅在 ErrSoftRate/ErrAccountFault 分支用于解析重置时间/分野；model 为请求
 // 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
+// noteRiskSignal 把「上游在收紧」的信号推给告警通道（同类 30 分钟静默一次）。
+//
+// 只挑这四类，不报普通限流与参数错误——429 和 400 天天有，报了只会让人对告警
+// 脱敏。四类各自对应一种收紧方式：
+//   - channel_refused（11128）：上游判定请求不是官方客户端发的（内容指纹命中）
+//   - waf_block（403）：出口 IP 被 WAF 拦（多号连撞时最危险）
+//   - session_dead（12153）：登录态被踢，通常意味着账号被风控
+//   - account_fault（11140）：渠道校验失败（账号级授权异常）
+//
+// 生产上这四类长期是 0 条——正因为稀少，出现一次就值得看一眼。
+func (h *Handler) noteRiskSignal(uid string, kind upstream.ErrKind, body, model string) {
+	n := h.cfg.Alert
+	if n == nil {
+		return
+	}
+	short := uid
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	var sb strings.Builder
+	sb.WriteString("账号: ")
+	sb.WriteString(short)
+	if model != "" {
+		sb.WriteString("\n模型: ")
+		sb.WriteString(model)
+	}
+	if s := strings.TrimSpace(body); s != "" {
+		if len(s) > 400 {
+			s = s[:400] + "…"
+		}
+		sb.WriteString("\n上游原文: ")
+		sb.WriteString(s)
+	}
+	detail := sb.String()
+	switch kind {
+	case upstream.ErrChannelRefused:
+		n.Report("channel_refused", "风控信号：11128 通道校验失败（上游认为请求不是官方客户端）", detail)
+	case upstream.ErrWafBlock:
+		n.Report("waf_block", "风控信号：403 WAF 拦截（出口 IP 可能已被标记）", detail)
+	case upstream.ErrSessionDead:
+		n.Report("session_dead", "风控信号：登录态失效 12153（账号可能被踢）", detail)
+	case upstream.ErrAccountFault:
+		n.Report("account_fault", "风控信号：11140 渠道校验失败", detail)
+	}
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
+	h.noteRiskSignal(uid, kind, body, model)
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），

@@ -729,3 +729,37 @@ func TestPausedStillTravels(t *testing.T) {
 		t.Errorf("travel status calls=%d want 2（u1 + 暂停号 u2 照常旅行）", got)
 	}
 }
+
+// TestSkipBalanceRefreshPaused 后台刷新跳过暂停选号的账号；手动刷新（background=false）
+// 不跳过——面板手动刷新是用户主动要看余额，不该被 paused 挡掉。
+// 排程签到不走这条判定（RunCheckinNow 照常刷新暂停号的余额）。
+func TestSkipBalanceRefreshPaused(t *testing.T) {
+	cases := []struct {
+		paused, background, want bool
+		why                      string
+	}{
+		{true, true, true, "后台刷新 + 暂停号：跳过（不接流量，$省账单请求）"},
+		{true, false, false, "手动刷新 + 暂停号：照常刷（用户主动要看）"},
+		{false, true, false, "后台刷新 + 正常号：照常"},
+		{false, false, false, "手动刷新 + 正常号：照常"},
+	}
+	for _, c := range cases {
+		if got := skipBalanceRefresh(c.paused, c.background); got != c.want {
+			t.Errorf("paused=%v background=%v: got %v want %v（%s）", c.paused, c.background, got, c.want, c.why)
+		}
+	}
+}
+
+// TestCheckinAccountGapInRange 排程签到的账号间间隔必须落在 45s×(1±30%) 内：
+// 太短等于没打散（9 个号仍在同一秒挤在一起），太长会把签到拖进下一个时点。
+func TestCheckinAccountGapInRange(t *testing.T) {
+	base := checkinAccountGapBase
+	lo := base * time.Duration(1000-checkinAccountGapPermill) / 1000
+	hi := base * time.Duration(1000+checkinAccountGapPermill) / 1000
+	for i := 0; i < 200; i++ {
+		g := checkinAccountGap()
+		if g < lo || g > hi {
+			t.Fatalf("gap=%v 越界 [%v, %v]", g, lo, hi)
+		}
+	}
+}

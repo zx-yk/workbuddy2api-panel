@@ -916,14 +916,27 @@ func TestShutdownTimeoutConfig(t *testing.T) {
 }
 
 // TestScheduleHumanizeConfig 抖动幅度 0–500，越界报错；夜猫子上限不得为负；
-// 缺省全部为 0（行为与接入前一致）。
+// 缺省抖动为 200（±20%）——「精确整点打卡」本身就是机器特征，默认值应偏向像人。
+// 夜猫子上限缺省仍为 0（不限）。
+//
+// 注意：0 仍是合法值（旧配置显式写 0 = 不抖动，行为逐字不变），只是不再是缺省。
 func TestScheduleHumanizeConfig(t *testing.T) {
 	def := Default()
 	if err := def.normalize(); err != nil {
 		t.Fatalf("normalize default: %v", err)
 	}
-	if def.Schedule.BalanceRefreshJitterPermill != 0 || def.Schedule.TaskSweepJitterPermill != 0 || def.Schedule.NightAccountCap != 0 {
-		t.Fatalf("缺省应为全 0（不改变现有行为）: %+v", def.Schedule)
+	if def.Schedule.BalanceRefreshJitterPermill != 200 || def.Schedule.TaskSweepJitterPermill != 200 {
+		t.Fatalf("缺省抖动应为 200（±20%%），got balance=%d sweep=%d",
+			def.Schedule.BalanceRefreshJitterPermill, def.Schedule.TaskSweepJitterPermill)
+	}
+	if def.Schedule.NightAccountCap != 0 {
+		t.Fatalf("夜猫子上限缺省应为 0（不限），got %d", def.Schedule.NightAccountCap)
+	}
+	// 显式写 0 仍等于「不抖动」：老配置不用改。
+	if off, err := ParseConfig([]byte(`{"schedule":{"balance_refresh_jitter_permill":0,"task_sweep_jitter_permill":0}}`)); err != nil {
+		t.Fatalf("显式 0 应可解析: %v", err)
+	} else if off.Schedule.BalanceRefreshJitterPermill != 0 || off.Schedule.TaskSweepJitterPermill != 0 {
+		t.Fatalf("显式 0 未生效: %+v", off.Schedule)
 	}
 
 	ok, err := ParseConfig([]byte(`{"schedule":{"balance_refresh_jitter_permill":300,"task_sweep_jitter_permill":500,"night_account_cap":3}}`))

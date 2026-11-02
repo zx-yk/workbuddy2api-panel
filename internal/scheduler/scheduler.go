@@ -492,7 +492,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			defer wg.Done()
 			switch k {
 			case taskCheckin:
-				s.RunCheckinNow()
+				s.runCheckin(ctx, true) // 排程触发走错峰；面板手动入口 RunCheckinNow 不延迟
 			case taskTravel:
 				s.RunTravelNow()
 			case taskActivity:
@@ -538,9 +538,23 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
 func (s *Scheduler) RunCheckinNow() {
+	s.runCheckin(context.Background(), false)
+}
+
+// runCheckin 签到主流程。stagger=true（排程触发）时在账号之间插入随机间隔——
+// 9 个账号连续几秒内跑完签到，是上游最容易识别的机器特征之一（真人不会在同一
+// 分钟签到 9 次，更不会每次间隔精确 45 秒）。面板手动触发传 false，保持即刻完成。
+func (s *Scheduler) runCheckin(ctx context.Context, stagger bool) {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	first := true
 	for _, st := range s.cfg.Pool.List() {
+		if stagger && !first {
+			if !sleepCtx(ctx, checkinAccountGap()) {
+				return // 停机取消：放弃剩余账号，下一轮排程再补
+			}
+		}
+		first = false
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -763,12 +777,20 @@ func (s *Scheduler) runBalanceRefresh(ctx context.Context, interval time.Duratio
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	spread := balanceStaggerSpread(interval)
+	pausedSkipped := 0
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
+			continue
+		}
+		// 暂停选号的账号不接流量，没有必要跟着后台刷新的节奏查账单：它的余额由
+		// 签到时（每天 2 次，含暂停号）和面板手动刷新保证。这一条在「多号但只放
+		// 少数接流量」的部署里收益最大——省掉的是纯暴露、零收益的账单请求。
+		if skipBalanceRefresh(st.Paused, background) {
+			pausedSkipped++
 			continue
 		}
 		if background {
@@ -792,6 +814,9 @@ func (s *Scheduler) runBalanceRefresh(ctx context.Context, interval time.Duratio
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())
+	if pausedSkipped > 0 {
+		log.Printf("balance: 跳过 %d 个暂停选号的账号（余额由签到时刷新）", pausedSkipped)
+	}
 }
 
 func (s *Scheduler) refreshOneBalance(a *auth.Auth, uid string, expiringSoon time.Duration) {
@@ -1013,4 +1038,30 @@ func (s *Scheduler) BalanceRefreshedAt() time.Time {
 		return time.Unix(0, v)
 	}
 	return time.Time{}
+}
+
+// checkinAccountGapBase / checkinAccountGapPermill 排程签到时的账号间基础间隔与抖动。
+// 45s ×(1 ±30%)：9 个号大约铺开 6 分钟。选这个量级是因为——太短（几秒）等于没打散，
+// 太长会把签到拖进下一个时点、也拖慢「签到后立刻解冻」的体验；±30% 是让间隔看起来
+// 不像定时器（真人不会每次精确 45 秒）。
+const (
+	checkinAccountGapBase    = 45 * time.Second
+	checkinAccountGapPermill = 300
+)
+
+// checkinAccountGap 返回一个带随机抖动的账号间签到间隔。
+func checkinAccountGap() time.Duration {
+	return jitteredInterval(checkinAccountGapBase, checkinAccountGapPermill, scheduleRand)
+}
+
+// skipBalanceRefresh 报告后台余额刷新是否应跳过该账号。
+//
+// 暂停选号（paused）的账号不接任何流量，跟着刷新节奏查账单是纯暴露、零收益的
+// 上游请求：多号部署里「只放少数接流量」时，这类请求能占到账单查询的大头。
+// 它们的余额由签到时（每天两次，含暂停号）与面板手动刷新保证。
+//
+// 抽成独立函数是为了可测：runBalanceRefresh 直接依赖具体 *upstream.Client，
+// 无法在单测里跑通整条循环，但这条判定本身值得钉住。
+func skipBalanceRefresh(paused, background bool) bool {
+	return background && paused
 }

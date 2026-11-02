@@ -218,6 +218,18 @@ type Config struct {
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
 
+	// Alert 风控信号告警。把「上游开始收紧」的早期迹象（11128 通道校验 / 403 WAF /
+	// 12153 session 失效 / 11140 渠道校验）推到 webhook，同类事件 30 分钟静默一次。
+	// 只做投递不做规则引擎：阈值与判定写在 server 侧的 noteRiskSignal 里。
+	Alert struct {
+		Enabled bool   `json:"enabled"`
+		// Webhook 投递地址。兼容 PushPlus（token 放 URL query，body 用 title/content），
+		// 也能被任意通用 webhook 消费。留空 = 不推送。
+		Webhook string `json:"webhook"`
+		// MinIntervalSeconds 同类事件的静默窗口（秒），缺省 1800（30 分钟）。
+		MinIntervalSeconds int `json:"min_interval_seconds"`
+	} `json:"alert"`
+
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
 		Token string `json:"token"` // url 非完整连接串时用于组装 rediss://default:<token>@<host>:6379
@@ -318,13 +330,16 @@ func Default() *Config {
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true
+	c.Alert.MinIntervalSeconds = 1800 // 同类风控信号 30 分钟静默一次
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Schedule.KeepaliveRefreshWindow = "168h"
 	c.Schedule.BlackcatHours = []int{23}
-	c.Schedule.GrowthHours = []int{1}
+	// 成长任务默认 15:00 而不是 01:00：凌晨让全池账号同时活动是最容易被识别的
+	// 「不是人」特征之一（真人极少在凌晨一点刷成长任务）。
+	c.Schedule.GrowthHours = []int{15}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
@@ -335,6 +350,10 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 周期任务间隔抖动默认 ±20%：不让每轮刷新/扫描落在精确整点。0 是旧行为
+	// （逐字不变），但「精确打卡」本身就是机器特征，默认值应当偏向像人。
+	c.Schedule.BalanceRefreshJitterPermill = 200
+	c.Schedule.TaskSweepJitterPermill = 200
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
 	c.Upstream.TimeoutSeconds = 120
@@ -709,7 +728,7 @@ func (c *Config) normalize() error {
 		c.Schedule.BlackcatHours = []int{23}
 	}
 	if len(c.Schedule.GrowthHours) == 0 {
-		c.Schedule.GrowthHours = []int{1}
+		c.Schedule.GrowthHours = []int{15}
 	}
 	// 余额后台刷新：启用时 minutes<=0 回落默认 5；关闭时 interval 保持 0（不启动）。
 	if c.Schedule.BalanceRefreshEnabled {

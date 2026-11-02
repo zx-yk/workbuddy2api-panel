@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -336,6 +337,18 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
+	// 风控信号告警：把 11128 / 403 WAF / 12153 session / 11140 渠道校验推到 webhook。
+	// 未配 webhook 时为 nil，noteRiskSignal 走 nil 短路（零开销）。
+	var alerter *alert.Notifier
+	if cfg.Alert.Enabled {
+		alerter = alert.New(cfg.Alert.Webhook, time.Duration(cfg.Alert.MinIntervalSeconds)*time.Second)
+		if alerter != nil {
+			log.Printf("alert: 风控信号告警已启用（静默窗口 %ds）", cfg.Alert.MinIntervalSeconds)
+		} else {
+			log.Printf("WARN: alert.enabled=true 但 webhook 为空，告警不会推送")
+		}
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:               p,
 		Upstream:           up,
@@ -360,6 +373,7 @@ func main() {
 		// 模型黑名单原始条目；运行期以 livecfg 快照为准（热生效），此处供
 		// Live 为 nil 的裸用/测试路径。
 		ModelsHidden: cfg.Models.Hidden,
+		Alert:        alerter,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
