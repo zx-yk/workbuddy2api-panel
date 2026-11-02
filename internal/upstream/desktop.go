@@ -175,7 +175,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("X-Product", "SaaS")
 	// X-Request-ID 恒 32 位小写 hex（官方形态）。此前是 deriveID(36hex)+纳秒后 6 位
 	// 的 42 字符混合串——长度与字符集都偏离，且与同批其它通道的纯纳秒数字并存。
-	req.Header.Set("X-Request-ID", session.NewMessageID())
+	setExact(req.Header, "X-Request-ID", session.NewMessageID())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -502,22 +502,22 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	setDomainHeader(h, a)
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
-	h.Set("X-Conversation-ID", conversationID)
+	setExact(h, "X-Conversation-ID", conversationID)
 	// 消息级 ID：X-Request-ID 与 X-Conversation-Message-ID **同值**、32 位小写 hex
 	// （CLI 内核 randomUUID().replace(/-/g,"") 后两个头吃同一个值）。
 	msgID := session.NewMessageID()
-	h.Set("X-Conversation-Message-ID", msgID)
-	h.Set("X-Request-ID", msgID)
+	setExact(h, "X-Conversation-Message-ID", msgID)
+	setExact(h, "X-Request-ID", msgID)
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-Agent-Runtime", "other")
 	// X-Private-Data = "false"：模型优化默认开启（product.json 的
 	// DefaultModelOptimizationOff=false），CLI 此时发 false。原发 true 方向反了。
 	h.Set("X-Private-Data", "false")
-	h.Set("X-IDE-Name", "WorkBuddy")
-	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", c.clientVersion())
-	h.Set("x-codebuddy-request", "1")
+	setExact(h, "X-IDE-Name", "WorkBuddy")
+	setExact(h, "X-IDE-Type", "WorkBuddy")
+	setExact(h, "X-IDE-Version", c.clientVersion())
+	setExact(h, "x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
 	}

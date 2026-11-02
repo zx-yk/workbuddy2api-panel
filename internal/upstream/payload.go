@@ -5,10 +5,35 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
 )
+
+// marshalNoEscape 序列化但**不转义 < > &**。
+//
+// 官方客户端是 Node，JSON.stringify 不碰这三个字符；Go 的 json.Marshal 默认把它们
+// 写成 \u003c / \u003e / \u0026。一个 78KB 的系统提示里通常有几十个 <>&（代码、
+// 箭头、比较运算），逐字节对比会差出几百字节——实测官方 77907B，我们 78297B，
+// 差值 390 = 78 字符 × 5，一分不差全来自这里。
+//
+// 该函数只用于**出站请求体**。响应侧仍需默认转义（下游是浏览器/网页环境时
+// \u003c 更安全），不要复用。
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	b := buf.Bytes()
+	// Encoder.Encode 末尾补 '\n'（流式编码器语义），JSON body 不要这个换行。
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	return b, nil
+}
 
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
@@ -91,7 +116,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 			sanitizeMessages(msgs)
 		}
 	}
-	out, err := json.Marshal(obj)
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return src
 	}
@@ -401,7 +426,7 @@ func ensureConsoleSystem(body []byte) []byte {
 		}
 	}
 	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
-	out, err := json.Marshal(obj)
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return body
 	}

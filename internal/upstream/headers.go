@@ -26,6 +26,22 @@ const (
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
 
+// setExact 以**给定的大小写**写入请求头。
+//
+// http.Header.Set 会把键名规范化成 textproto 的 CanonicalMIMEHeaderKey（每个词首字母
+// 大写、其余小写）：`x-stainless-arch` → `X-Stainless-Arch`、`X-B3-TraceId` →
+// `X-B3-Traceid`、`X-Conversation-ID` → `X-Conversation-Id`。而官方客户端是 Node，
+// 直接按代码里写的键名发送，抓包实测就是 `x-stainless-*` 全小写、`X-B3-TraceId` 保留
+// 大写的 Id、`traceparent`/`baggage`/`b3` 全小写。
+//
+// 直接写 map 可以绕过规范化：net/http 落盘时按 map 里的键原样写出（只对键排序）。
+//
+// 约束：用本函数写的头**不能用 Header.Get/Del 按规范键名读回**（Get 会查规范形）。
+// 目前这些头只写不读，符合约束；将来若要读，请用 map 直接索引。
+func setExact(h http.Header, key, value string) {
+	h[key] = []string{value}
+}
+
 // originRefererFor 按账号 realm 返回 Origin/Referer 基础域：
 // global → https://www.workbuddy.ai；cn（含全局开关未开）→ https://www.codebuddy.cn。
 func originRefererFor(a *auth.Auth) string {
@@ -288,15 +304,15 @@ const (
 
 func (c *Client) injectSDKHeaders(req *http.Request) {
 	h := req.Header
-	h.Set("x-stainless-arch", sdkArch)
-	h.Set("x-stainless-lang", "js")
-	h.Set("x-stainless-os", sdkOS)
-	h.Set("x-stainless-package-version", sdkPackageVersion)
+	setExact(h, "x-stainless-arch", sdkArch)
+	setExact(h, "x-stainless-lang", "js")
+	setExact(h, "x-stainless-os", sdkOS)
+	setExact(h, "x-stainless-package-version", sdkPackageVersion)
 	// retry-count：官方每次 HTTP 尝试从 0 起算。网关侧的换号是一组独立的出站请求，
 	// 每条都是「第一次尝试」，所以恒 0。
-	h.Set("x-stainless-retry-count", "0")
-	h.Set("x-stainless-runtime", "node")
-	h.Set("x-stainless-runtime-version", sdkRuntimeVersion)
+	setExact(h, "x-stainless-retry-count", "0")
+	setExact(h, "x-stainless-runtime", "node")
+	setExact(h, "x-stainless-runtime-version", sdkRuntimeVersion)
 }
 
 // injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合）。
@@ -384,14 +400,14 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		conversationID = session.NewMessageID()
 	}
 	convHeaderID := conversationHeaderID(conversationID)
-	req.Header.Set("X-Conversation-ID", convHeaderID)
-	req.Header.Set("X-Conversation-Request-ID", convReqID)
-	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", messageID)
+	setExact(req.Header, "X-Conversation-ID", convHeaderID)
+	setExact(req.Header, "X-Conversation-Request-ID", convReqID)
+	setExact(req.Header, "X-Conversation-Message-ID", messageID)
+	setExact(req.Header, "X-Request-ID", messageID)
 	// X-Root-Request-ID：CLI 内核在 resolveRootRequestId() 非空时必发，主对话即
 	// 「本次 user send 的根请求」= conversationRequestID（抓包实证：用户对话那条带它，
 	// 自动生成标题那条不带——与「有根请求才发」的写法一致）。
-	req.Header.Set("X-Root-Request-ID", convReqID)
+	setExact(req.Header, "X-Root-Request-ID", convReqID)
 	// 链路族：自洽的 OTEL trace（见 traceID32 注释）。
 	// 此前直接拿 conversationRequestID 当 trace id、SpanId 取 messageID[:16]、
 	// 且没有 traceparent / b3 / ParentSpanId——「有 B3 的分片但没有 trace 上下文」。
@@ -401,16 +417,16 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	}
 	spanID := session.NewMessageID()[:16] // 每请求新 span（与消息 id 互不关联）
 	parentSpanID := parentSpanOf(conversationID)
-	req.Header.Set("X-Trace-ID", traceID)
-	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
-	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentSpanID)
-	req.Header.Set("X-B3-TraceId", traceID)
-	req.Header.Set("X-B3-ParentSpanId", parentSpanID)
-	req.Header.Set("X-B3-SpanId", spanID)
-	req.Header.Set("X-B3-Sampled", "1")
+	setExact(req.Header, "X-Trace-ID", traceID)
+	setExact(req.Header, "traceparent", "00-"+traceID+"-"+spanID+"-01")
+	setExact(req.Header, "b3", traceID+"-"+spanID+"-1-"+parentSpanID)
+	setExact(req.Header, "X-B3-TraceId", traceID)
+	setExact(req.Header, "X-B3-ParentSpanId", parentSpanID)
+	setExact(req.Header, "X-B3-SpanId", spanID)
+	setExact(req.Header, "X-B3-Sampled", "1")
 	// baggage：官方把会话 id 与轮级请求 id 作为 W3C baggage 双发（抓包实测
 	// `codebuddy.session_id=…,codebuddy.conversation_request_id=…`）。
-	req.Header.Set("baggage", "codebuddy.session_id="+convHeaderID+
+	setExact(req.Header, "baggage", "codebuddy.session_id="+convHeaderID+
 		",codebuddy.conversation_request_id="+convReqID)
 }
 
@@ -469,9 +485,9 @@ func (c *Client) injectAttribution(req *http.Request) {
 	req.Header.Set("X-Agent-Type", "main")
 	req.Header.Set("X-Agent-Runtime", "other")
 	req.Header.Set("X-Private-Data", "false")
-	req.Header.Set("X-IDE-Name", name)
-	req.Header.Set("X-IDE-Type", name)
-	req.Header.Set("X-IDE-Version", c.clientVersion())
+	setExact(req.Header, "X-IDE-Name", name)
+	setExact(req.Header, "X-IDE-Type", name)
+	setExact(req.Header, "X-IDE-Version", c.clientVersion())
 	// X-Product 恒为 "SaaS"：官方桌面端就是这么发的（X-IDE-Name/Type 才是 WorkBuddy，
 	// 两者不是同一个语义）。此前这里跟随 name 发 "WorkBuddy"，与同一账号事件上报
 	// 通道（desktop.go 全部 SaaS）自相矛盾——同一客户端两条路径报出两个产品标识，

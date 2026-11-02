@@ -39,7 +39,7 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 		// X-Request-ID 恒 32 位小写 hex（官方客户端形态）。此前是
 		// deriveID(36hex)+纳秒后 6 位的 42 字符混合串——长度和字符集都偏离，
 		// 且与同批 DesktopChatWithExpert 的纯 19 位纳秒数字并存。
-		if id := r.Header.Get("X-Request-ID"); !isLowerHexN(id, 32) {
+		if id := hdrExact(r.Header, "X-Request-ID"); !isLowerHexN(id, 32) {
 			t.Errorf("X-Request-ID=%q 不是 32 位小写 hex（官方形态）", id)
 		}
 		raw, _ := io.ReadAll(r.Body)
@@ -164,7 +164,7 @@ func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 		if r.URL.Path != "/v2/chat/completions" {
 			t.Errorf("path=%s want /v2/chat/completions", r.URL.Path)
 		}
-		gotID = r.Header.Get("X-Request-ID")
+		gotID = hdrExact(r.Header, "X-Request-ID")
 		gotIntent = r.Header.Get("X-Agent-Intent")
 		gotType = r.Header.Get("X-Agent-Type")
 		w.Header().Set("Content-Type", "text/event-stream")
