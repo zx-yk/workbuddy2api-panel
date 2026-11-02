@@ -268,6 +268,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectSDKHeaders(req)
 	// 会话头族（对话/请求/消息/链路族/baggage），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	// Connection: keep-alive —— 官方客户端（Node）对每条 chat 请求都显式发这个头，
+	// 而 Go 的 Transport 对 HTTP/1.1 认为是默认语义、不落字面。抓包逐项对拍时它是
+	// 唯一「官方有、我们没有」的头。显式写入不影响 Go 自己的连接复用决策。
+	setExact(req.Header, "Connection", "keep-alive")
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
@@ -493,6 +497,10 @@ func (c *Client) injectAttribution(req *http.Request) {
 	// 通道（desktop.go 全部 SaaS）自相矛盾——同一客户端两条路径报出两个产品标识，
 	// 是可判别的内部不一致。
 	req.Header.Set("X-Product", "SaaS")
+	// x-codebuddy-request 是官方客户端的固定标记（抓包两条请求都带 "1"）。
+	// 此前只有专家会话流程（DesktopChatWithExpert）发，主 chat 路径漏了——
+	// 同一个账号的两种请求一个带一个不带，本身就是可判别的内部不一致。
+	setExact(req.Header, "x-codebuddy-request", "1")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。

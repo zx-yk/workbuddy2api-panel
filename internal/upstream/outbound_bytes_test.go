@@ -91,11 +91,12 @@ func TestChatHeadersWireCase(t *testing.T) {
 		"x-stainless-arch:", "x-stainless-lang:", "x-stainless-os:",
 		"x-stainless-package-version:", "x-stainless-retry-count:",
 		"x-stainless-runtime:", "x-stainless-runtime-version:",
-		// x-codebuddy-request 仅专家会话流程（DesktopChatWithExpert）发，见测试说明。
+		"x-codebuddy-request:",
 		"X-Request-ID:", "X-Conversation-ID:", "X-Conversation-Message-ID:",
 		"X-Conversation-Request-ID:", "X-Root-Request-ID:",
 		"X-IDE-Name:", "X-IDE-Type:", "X-IDE-Version:",
 		"X-Trace-ID:", "X-B3-TraceId:", "X-B3-SpanId:", "X-B3-Sampled:",
+		"Connection:",
 		"traceparent:", "b3:", "baggage:",
 	}
 	for _, k := range wantExact {
