@@ -250,6 +250,34 @@ func claimTaskReward(p *Panel, a *auth.Auth, code string) (credit, energy int64,
 	return p.cfg.Upstream.ClaimReward(a, code)
 }
 
+// taskItemGap 自动任务逐项执行的项间间隔。
+// 上游脚本口径的相邻上报间隔是 1.05s（见 reportGap），但那样一轮 30 项要 30 秒以上；
+// 这里取 800ms：既把「几十个请求挤在几秒内」拉平成分钟级，又不至于把一轮拖太久。
+var taskItemGap = 800 * time.Millisecond
+
+// taskFromSnapshotOrFetch 优先用阶段 0 的快照判断任务是否存在；快照不可用时才回读。
+//
+// snapOK=false（列表那一次就失败）时退化为逐项回读——宁可多打一次上游，也不能因为
+// 一次读失败把所有任务都判成「该账号无此任务」而整轮跳过。mp 码同理：mp 列表没拿到
+// 就不能断言它不存在。
+func (p *Panel) taskFromSnapshotOrFetch(a *auth.Auth, code string, snap, mpSnap map[string]*upstream.Task, snapOK, mpSnapOK bool) (*upstream.Task, error) {
+	if !snapOK {
+		return p.taskByCode(a, code)
+	}
+	if t := snap[code]; t != nil {
+		return t, nil
+	}
+	if isMPTaskCode(code) {
+		if !mpSnapOK {
+			return p.taskByCode(a, code)
+		}
+		if t := mpSnap[code]; t != nil {
+			return t, nil
+		}
+	}
+	return nil, nil // 快照里没有 = 该账号确实没有这个任务，不必再问一次上游
+}
+
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
 // 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
 // 未知码不多打一次上游）。
@@ -1298,8 +1326,19 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	var out []map[string]any
 
-	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
+	// 阶段 0 顺带把整份列表留成快照：逐项执行时用它判断「有没有这个任务、是否已完成」，
+	// 不再每项重新拉一次列表。此前每个任务项在动作前后各回读一次（动作后还要轮询），
+	// 一轮下来列表请求被放大到几十次；上游同类实现的实证是「17 个任务 24 次列表查询，
+	// 背靠背直接撞 429」。
+	//
+	// 快照只用于**执行前**的判断：动作后的进度是上游异步计的，必须回读，不能用快照。
+	snapOK := false
+	snap := map[string]*upstream.Task{}
 	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+		snapOK = true
+		for i := range tasks {
+			snap[tasks[i].TaskCode] = &tasks[i]
+		}
 		var codes []string
 		for _, t := range tasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
@@ -1323,7 +1362,13 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	}
 
 	// 阶段 0b：小程序口径任务单独接受（默认列表不含 mp 码；失败不阻塞）。
+	mpSnapOK := false
+	mpSnap := map[string]*upstream.Task{}
 	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+		mpSnapOK = true
+		for i := range mpTasks {
+			mpSnap[mpTasks[i].TaskCode] = &mpTasks[i]
+		}
 		var mpCodes []string
 		for _, t := range mpTasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
@@ -1346,9 +1391,14 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 	}
 
-	for _, act := range autoActions {
+	for i, act := range autoActions {
+		if i > 0 {
+			// 项间留白：查询/领奖类项此前是零间隔背靠背打上游（只有真跑了动作的项
+			// 才有间隔），一轮下来几十个请求挤在几秒内，既像脚本也容易触发限流。
+			time.Sleep(taskItemGap)
+		}
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
-		before, err := p.taskByCode(a, act.TaskCode)
+		before, err := p.taskFromSnapshotOrFetch(a, act.TaskCode, snap, mpSnap, snapOK, mpSnapOK)
 		if err != nil {
 			item["status"] = "error"
 			item["message"] = "查询失败: " + err.Error()

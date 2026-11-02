@@ -350,6 +350,17 @@ const (
 	modelBlockBaseTTL = 15 * time.Minute
 	modelBlockShift   = 4
 	modelBlockMaxTTL  = 2 * time.Hour
+
+	// modelBlockAuthTTL 11158「该账号类型无此模型权限」的固定 TTL。
+	//
+	// 与 11102 分开：11102 可能是路径差异/上游抖动/分类误判，几分钟就能自愈，所以
+	// 用短退避；11158 是**授权属性**（账号套餐不含该模型），短时间内不会变，按退避
+	// 反复探测只是每 2 小时往上游打一次注定失败的请求——既占轮转名额，也是一条可
+	// 观测的重复失败。
+	//
+	// 取 24h 而不是永久：套餐/权限会变（续费、活动放开），永久负缓存会让账号在权限
+	// 恢复后再也用不上这个模型，只能人工干预。一天一次探测是成本与自愈速度的折中。
+	modelBlockAuthTTL = 24 * time.Hour
 )
 
 // BlockModelBackoff 11102「该后端无此模型」的 (账号, 模型) 负缓存入口
@@ -377,12 +388,7 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		hits = e.modelCooldowns[model].Hits
 	}
 	hits++
-	ttl := modelBlockBaseTTL
-	if d := ttl * (1 << uint(min(hits-1, modelBlockShift))); d < modelBlockMaxTTL {
-		ttl = d
-	} else {
-		ttl = modelBlockMaxTTL
-	}
+	ttl := modelBlockTTL(reason, hits)
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = map[string]modelCooldown{}
 	}
@@ -392,6 +398,27 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		Hits:   hits,
 	}
 	p.dirty.Store(true)
+}
+
+// modelBlockTTL 按码给负缓存时长：11158 是授权属性（固定 24h），11102 按退避阶梯
+// （首次 15m，翻倍到 2h 封顶）。
+func modelBlockTTL(reason string, hits int) time.Duration {
+	if strings.HasPrefix(reason, "11158") {
+		return modelBlockAuthTTL
+	}
+	ttl := modelBlockBaseTTL
+	if d := ttl * (1 << uint(min(hits-1, modelBlockShift))); d < modelBlockMaxTTL {
+		return d
+	}
+	return modelBlockMaxTTL
+}
+
+// modelBlockMaxTTLFor 该码的负缓存上限（持久化恢复时的存量钳制用）。
+func modelBlockMaxTTLFor(reason string) time.Duration {
+	if strings.HasPrefix(reason, "11158") {
+		return modelBlockAuthTTL
+	}
+	return modelBlockMaxTTL
 }
 
 // modelBlockReason 报告该模型冷却是否属于「确定性拒绝」负缓存（11102/11158）。

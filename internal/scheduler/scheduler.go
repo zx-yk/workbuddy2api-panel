@@ -772,7 +772,50 @@ func (s *Scheduler) RunBalanceRefreshStaggered(ctx context.Context, interval tim
 	s.runBalanceRefresh(ctx, interval, true)
 }
 
+// sessionRecheckGap 会话失效账号的复核间隔：既是节流窗口，也是失败后的重试间隔。
+// 6 小时是「能较快恢复容量」与「不反复撞已封账号」的折中——对已被上游判死的会话，
+// 高频探测本身就是在加重信号。
+var sessionRecheckGap = 6 * time.Hour
+
+// runSessionRecheck 低频复核「因会话失效被禁用」的账号：一次余额查询就能判断会话是否
+// 恢复，成功即恢复选号，失败则把下次尝试推后一个窗口。
+//
+// 只处理 session dead：11140 是上游对账号的显式限制（需申诉）、手动禁用是运维意图，
+// 两类都不自动探测（理由见 pool.SessionDeadCandidates）。
+func (s *Scheduler) runSessionRecheck(ctx context.Context) {
+	if s.cfg.Pool == nil || s.cfg.Upstream == nil {
+		return
+	}
+	uids := s.cfg.Pool.SessionDeadCandidates(time.Now(), sessionRecheckGap)
+	if len(uids) == 0 {
+		return
+	}
+	revived := 0
+	for _, uid := range uids {
+		if ctx.Err() != nil {
+			return
+		}
+		a := s.cfg.Pool.AuthByUID(uid)
+		if a == nil {
+			continue
+		}
+		if _, _, err := s.cfg.Upstream.UserResource(a); err == nil {
+			s.cfg.Pool.ReviveDisabled(uid)
+			revived++
+			continue
+		}
+		// 仍然不可用（含网络失败）：推后一个窗口再试，避免每轮刷新都撞一次。
+		s.cfg.Pool.TouchDisabledAt(uid)
+	}
+	log.Printf("session recheck: 复核 %d 个会话失效账号，恢复 %d 个（下次尝试间隔 %s）",
+		len(uids), revived, sessionRecheckGap)
+}
+
 func (s *Scheduler) runBalanceRefresh(ctx context.Context, interval time.Duration, background bool) {
+	// 搭车做一次会话失效率复核（自带 6h 节流，绝大多数轮次是空转）。
+	if background {
+		s.runSessionRecheck(ctx)
+	}
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()

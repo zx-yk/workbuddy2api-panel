@@ -168,6 +168,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			tokenUsage:               s.TokenUsage,
 			softStreak:               s.SoftStreak,
 			sessionDeadFails:         s.SessionDeadFails,
+			disabledAt:               s.DisabledAt,
 			consecutiveFails:         s.ConsecutiveFails,
 		}
 		// 到期快照按当前时刻惰性清洗：已过期、零剩余或超出总余额的脏数据不恢复。
@@ -211,7 +212,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				// 常量收窄后如果不动存量，升级要等这些条目自然到期才生效（最长 24 小时）。
 				// 6004 是上游重置墙钟语义，绝不碰。
 				if modelBlockReason(mc.Reason) {
-					if cap := now.Add(modelBlockMaxTTL); mc.Until.After(cap) {
+					if cap := now.Add(modelBlockMaxTTLFor(mc.Reason)); mc.Until.After(cap) {
 						mc.Until = cap
 					}
 				}
@@ -330,6 +331,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			TokenUsage:               e.tokenUsage,
 			SoftStreak:               e.softStreak,
 			SessionDeadFails:         e.sessionDeadFails,
+			DisabledAt:               e.disabledAt,
 			ConsecutiveFails:         e.consecutiveFails,
 			CreditsExpiring:          e.creditsExpiring,
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,

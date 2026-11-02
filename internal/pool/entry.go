@@ -287,6 +287,9 @@ type entry struct {
 	// 重学（再吃 2 次失败才禁用，期间每次都白打一轮上游）；清零点（refresh/chat 成功、
 	// 手工复活）同样落盘，重启后不残留旧计数。
 	sessionDeadFails int
+	// disabledAt 进入禁用态的时刻：只用于「会话失效自动复核」的节流（距上次尝试多久），
+	// 不参与任何选号判定。
+	disabledAt time.Time
 	// consecutiveFails 连续失败计数（连败降权，issue #114）——「不知道原因的兜底」：
 	// 覆盖 ErrClient（未知 4xx）与传输层失败（连不上上游）这类 applyErrorPolicy
 	// default 分支不罚号的形态。与 sessionDeadFails 同构但独立计数：12153 的终态
@@ -502,6 +505,10 @@ type stateAccount struct {
 	// 运行态计数（soft_streak/session_dead_fails/credits_expiring）不用 omitempty：
 	// 零值缺失会让人误以为"没记录"，实际是零值被省略。
 	SoftStreak int `json:"soft_streak"`
+	// DisabledAt 进入禁用态的时刻。仅供「会话失效自动复核」判断距上次尝试多久，
+	// 不参与选号。零值 = 旧状态文件没有该字段（按「刚刚禁用」处理，避免升级瞬间
+	// 把所有历史禁用号一起探测）。
+	DisabledAt time.Time `json:"disabled_at,omitempty"`
 	// SessionDeadFails 连续 12153 计数（判定 session 死亡的进度）。持久化以保留
 	// 「重启后连续计数继续累计」。
 	SessionDeadFails int `json:"session_dead_fails"`
