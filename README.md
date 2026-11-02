@@ -37,12 +37,49 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.8-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.9-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.9 · 2026-11-03
+
+这一版不加新功能，改的是「行为节律」和「出站报文形态」：让网关在时间与字节两个维度上更像一个
+真实客户端。无破坏性变更，替换二进制即可；新增的告警默认关闭。
+
+- **签到按账号错峰**：排程触发时账号之间插入 45 秒 ×(1±30%) 的随机间隔。此前多个账号串行跑完
+  签到只需几秒，等于同一秒签到多次；真人不会这样，间隔也不会每次精确一致。面板手动签到保持
+  即刻完成，不被拖慢。
+- **暂停选号的账号不再参与后台账单刷新**：暂停只表示不接流量，此前仍按刷新周期查余额——
+  在多账号、只放少数接流量的部署里，这类请求是纯暴露、零收益。它们的余额由签到时（每天两次，
+  含暂停账号）与面板手动刷新保证；手动刷新不受影响。
+- **新增风控信号告警**：把四类「上游在收紧」的信号推到 webhook——`11128` 通道校验失败、
+  `403` WAF、`12153` 登录态失效、`11140` 渠道校验，外加「60 秒内多账号接连 403」的 IP 级拦截
+  激活。同类事件 30 分钟静默一次（这些信号长期为零，出现一次就该看一眼；成串出现时逐条推送
+  只会让人对告警脱敏）。异步投递，失败只记日志、绝不阻塞请求；未配置 webhook 时零开销。
+  兼容 PushPlus（令牌随请求体发送，并校验其业务码——该服务失败也回 HTTP 200）。
+- **周期任务抖动缺省 ±20%，成长任务缺省时点从凌晨 1 点改到下午 3 点**：精确整点打卡本身就是
+  机器特征，默认值应当偏向像人；显式写 `0` 仍是旧行为，老配置不受影响。
+- **出站请求体不再转义 HTML 字符**：官方客户端（Node）的 JSON 序列化不碰 `<` `>` `&`，而 Go 的
+  `json.Marshal` 默认把它们写成 `\u003c` / `\u003e` / `\u0026`。一份 70KB 量级的系统提示里
+  通常有几十个这类字符，逐字节比对会差出数百字节。改后同一请求体与官方报文**逐字节同长**。
+- **头名按官方客户端大小写发送**：此前 `http.Header.Set` 会把键名规范化（`x-stainless-arch` →
+  `X-Stainless-Arch`、`X-B3-TraceId` → `X-B3-Traceid`、`X-Conversation-ID` →
+  `X-Conversation-Id`），而 Node 按代码里的拼写原样发送。现改为直接写入头 map 保留原始拼写。
+- **补齐两个官方必发头**：`Connection: keep-alive`（Go 认为 HTTP/1.1 下是默认语义、不落字面）与
+  `x-codebuddy-request: 1`（此前只有专家会话流程发，主对话路径漏了）。
+- **出站连接池按账号分桶**：`net/http` 的空闲连接按 `(scheme, host)` 复用、不区分账号，此前不同
+  账号的请求会跑在同一条 TCP/TLS 连接上——上游按连接聚合即可看出这是网关。现每个账号一份独立
+  连接池，未绑定账号的请求仍走共享池（行为与之前一致）。
+
+回归：新增 15 个用例——签到间隔区间、后台刷新跳过暂停账号的四象限、告警投递体/去重/nil 安全/
+投递失败不崩、风控信号触发与普通 429 不触发、请求体不转义（含末尾无换行）、头名线上大小写
+（裸 TCP 抓字节，断言原始拼写存在且规范化拼写不存在）、`x-codebuddy-request` 与 `Connection`
+在线上存在、连接池分桶（同账号复用、跨账号新建，裸 TCP 计数）。其中请求体转义、头名大小写、
+连接池分桶三条都做过**反向验证**——把改动退回去，对应断言必须失败。
+`go test ./...` 与 `go test -race ./...` 全绿。
 
 ### v1.16.8 · 2026-11-02
 
@@ -662,7 +699,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.8` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.9` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -674,17 +711,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.8-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.8-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.8-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.8-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.8-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.9-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.9-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.9-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.9-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.9-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.8
+V=1.16.9
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
