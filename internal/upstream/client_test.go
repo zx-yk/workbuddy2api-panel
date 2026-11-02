@@ -545,16 +545,21 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Timeout != 0 {
 		t.Errorf("ChatHTTP.Timeout=%v want 0 (no total cap)", c.ChatHTTP.Timeout)
 	}
-	// 共享同一个 Transport 实例，连接池不重复。
+	// 共享同一个传输层实例（uidTransport），但连接池按账号分桶：同账号复用、
+	// 跨账号绝不共用同一条 TCP/TLS 连接。
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
-		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
+		t.Errorf("ChatHTTP and HTTP must share the same transport layer")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
+	utr, ok := c.ChatHTTP.Transport.(*uidTransport)
 	if !ok {
-		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
+		t.Fatalf("Transport type=%T want *uidTransport", c.ChatHTTP.Transport)
 	}
-	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
-		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
+	// 分桶里的 Transport 仍带连接层加固参数（响应头上限 60s，慢冷启动留 3.75× 余量）。
+	if got := utr.forUID("probe").ResponseHeaderTimeout; got != 60*time.Second {
+		t.Errorf("ResponseHeaderTimeout=%v want 60s", got)
+	}
+	if utr.forUID("acct-a") == utr.forUID("acct-b") {
+		t.Error("不同账号必须用不同的连接池（否则会共用同一条上游连接）")
 	}
 }
 

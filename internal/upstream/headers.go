@@ -180,6 +180,8 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// injectAccountStableHeaders）。注入在 CommonHeaders——chat 经 ChatHeaders
 	// 叠加 CommonHeaders 天然继承；billing 域另行注入，全出站覆盖。
 	c.injectAccountStableHeaders(req, a)
+	// 账号 UID 进上下文：出站连接池按账号分桶的唯一依据（不上线、不改任何字节）。
+	attachAccountUID(req, a)
 }
 
 // acceptLanguageFor 按账号 realm 返回 Accept-Language：global → en-US，cn → zh-CN。
@@ -560,6 +562,9 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	}
 	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入。
 	c.injectDeviceToken(req, a)
+	// billing 域不走 CommonHeaders，这里单独挂 UID：连接池按账号分桶对
+	// 「账单 / 上报 / 签到」这类短 RPC 同样生效。
+	attachAccountUID(req, a)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。

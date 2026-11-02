@@ -768,7 +768,8 @@ type Client struct {
 
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
-	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
+	// 与 HTTP 共享同一个传输层实例（uidTransport），但**连接池按账号分桶**：
+	// 同账号复用连接，跨账号绝不复用。
 	ChatHTTP *http.Client
 
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
@@ -863,7 +864,9 @@ type CreditObserver func(uid string, credits int64)
 // TLS 握手超时 / 短 keepalive 探测 / 失败清池，参数见 transport.go——吸收上游
 // kongjianguan 4 连击实测经验）。
 func New() *Client {
-	tr := newTransport()
+	// 分桶传输层：一个账号一个连接池。共用单个 Transport 会让不同账号的请求
+	// 复用同一条 TCP/TLS 连接（见 uidTransport 注释）。
+	tr := newUIDTransport()
 	c := &Client{
 		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
@@ -882,6 +885,30 @@ func New() *Client {
 	}
 	c.SanitizeFingerprints.Store(true)
 	return c
+}
+
+// SetResponseHeaderTimeout 设置聊天首字节（响应头）上限。
+//
+// 取代早前 main 里对 `Transport.(*http.Transport)` 的类型断言：传输层换成
+// uidTransport 后那个断言会静默失配（首字节上限丢失）。这里同时作用于已有桶与
+// 后续新建的桶。
+func (c *Client) SetResponseHeaderTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	cl := c.ChatHTTP
+	if cl == nil {
+		cl = c.HTTP
+	}
+	if cl == nil {
+		return
+	}
+	switch tr := cl.Transport.(type) {
+	case *uidTransport:
+		tr.SetResponseHeaderTimeout(d)
+	case *http.Transport:
+		tr.ResponseHeaderTimeout = d
+	}
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。

@@ -6,10 +6,14 @@
 package upstream
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
+	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -114,5 +118,131 @@ func roundTripCloseIdle(rt http.RoundTripper) {
 	}
 	if ci, ok := rt.(closeIdler); ok {
 		ci.CloseIdleConnections()
+	}
+}
+
+// uidContextKey 请求上下文里的账号 UID（连接池分桶键）。
+type uidContextKey struct{}
+
+// attachAccountUID 把账号 UID 写进请求上下文（不可见，不影响任何出站字节）。
+//
+// 用上下文而不是新增请求头：头是发往上游的字节，多一个少一个都会改变指纹；
+// 上下文只在进程内。调用点放在头构造里（CommonHeaders / BillingHeaders），
+// 覆盖所有出站路径且不需要每个业务函数各改一遍。
+func attachAccountUID(req *http.Request, a *auth.Auth) {
+	if req == nil || a == nil || a.UID == "" {
+		return
+	}
+	// WithContext 返回浅拷贝；写回原指针让调用方后续设置的头仍然生效。
+	*req = *req.WithContext(context.WithValue(req.Context(), uidContextKey{}, a.UID))
+}
+
+// requestAccountUID 取请求的账号 UID：优先上下文，其次 X-User-Id 头
+// （少数路径只设头没走 CommonHeaders 时兜底）。
+func requestAccountUID(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if v, ok := req.Context().Value(uidContextKey{}).(string); ok && v != "" {
+		return v
+	}
+	return req.Header.Get("X-User-Id")
+}
+
+// maxUIDTransports 分桶上限。账号数是有限的（当前 9 个），上限只为防御
+// 异常输入（例如历史遗留的 per-session UID）导致 map 无界增长。
+const maxUIDTransports = 128
+
+// uidTransport 按账号分桶的连接池。
+//
+// 为什么必须分桶：net/http 的空闲连接按 (scheme, host) 复用，**不区分账号**。
+// 共用一个 *http.Transport 时，账号 A 的请求结束后，账号 B 的请求会捡起同一条
+// TCP/TLS 连接——上游按连接聚合就能看到「一条连接、多个 Authorization」。真实
+// 桌面客户端是每人一台机器，一条连接只有一个身份，这是最容易被识别为网关的
+// 结构性特征，而且与 TLS 指纹（JA3/JA4）无关，改头也不管用。
+//
+// 未绑定账号的请求（如匿名探测）走 "" 桶，行为与改造前完全一致。
+type uidTransport struct {
+	mu   sync.Mutex
+	m    map[string]*http.Transport
+	dial *net.Dialer
+	// respHeaderTimeout 非 0 时覆盖新建 Transport 的 ResponseHeaderTimeout
+	// （聊天首字节上限，由 main 从配置注入）。
+	respHeaderTimeout time.Duration
+}
+
+// newUIDTransport 构造默认分桶传输层（桶内 Transport 由 newTransport 生成）。
+func newUIDTransport() *uidTransport {
+	return &uidTransport{m: make(map[string]*http.Transport)}
+}
+
+// forUID 取（或惰性创建）某个账号的 Transport。
+func (t *uidTransport) forUID(uid string) *http.Transport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if tr, ok := t.m[uid]; ok {
+		return tr
+	}
+	if len(t.m) >= maxUIDTransports {
+		t.evictOneLocked()
+	}
+	tr := newTransport()
+	if t.dial != nil {
+		tr.DialContext = t.dial.DialContext
+	}
+	if t.respHeaderTimeout > 0 {
+		tr.ResponseHeaderTimeout = t.respHeaderTimeout
+	}
+	t.m[uid] = tr
+	return tr
+}
+
+// evictOneLocked 淘汰一个空桶（优先非 "" 桶）。调用方须持锁。
+// 只关闭空闲连接，不打断在途请求。
+func (t *uidTransport) evictOneLocked() {
+	for k, tr := range t.m {
+		if k == "" {
+			continue
+		}
+		tr.CloseIdleConnections()
+		delete(t.m, k)
+		return
+	}
+}
+
+// RoundTrip 按请求所属账号选择连接池。
+func (t *uidTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.forUID(requestAccountUID(req)).RoundTrip(req)
+}
+
+// CloseIdleConnections 关闭所有桶的空闲连接（失败清池路径使用）。
+func (t *uidTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, tr := range t.m {
+		tr.CloseIdleConnections()
+	}
+}
+
+// SetDialer 注入拨号器：作用于已有桶与后续新建的桶。
+func (t *uidTransport) SetDialer(d *net.Dialer) {
+	if d == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dial = d
+	for _, tr := range t.m {
+		tr.DialContext = d.DialContext
+	}
+}
+
+// SetResponseHeaderTimeout 设置聊天首字节（响应头）上限：作用于已有桶与后续新建的桶。
+func (t *uidTransport) SetResponseHeaderTimeout(d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.respHeaderTimeout = d
+	for _, tr := range t.m {
+		tr.ResponseHeaderTimeout = d
 	}
 }
