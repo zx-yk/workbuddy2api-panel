@@ -187,22 +187,18 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatQueueFullRotatesThen429WithoutPenalty 上游 429 + code 6021「queue.full.title」
-// 是渠道级容量满载（推理集群排队打满），**不是账号问题**（2026-10-15 实案：按
-// 限流逐号软冷却，2 秒绞杀整池健康号）。端到端断言：不轮转（只打一次上游）、
-// 直接回 503 + upstream_busy（可重试语义）、账号零惩罚（无冷却/无熔断/无连败）。
-// TestChatQueueFullRotatesThen429WithoutPenalty 上游 429 + code 6021
-// 「queue.full.title」是渠道级容量/排队信号，**不是账号问题**（2026-10-15 实案：
-// 按限流逐号软冷却，2 秒绞杀整池健康号）——零惩罚不变。2026-10-28 起恢复
-// **请求内轮转**，末端按 429 + Retry-After 透传排队语义：
-//   - 轮转：排队可用性间歇（同一分钟内既有 6021 也有成功），fail-fast 把几秒的
-//     抖动直接交给客户端；
-//   - 429 而非 503：上游本身回 429，SDK 按 Retry-After 自动重试；503 会被部分
-//     客户端当成服务不可用而中断任务。
+// TestChatQueueFullStopsRotationOnFirstHit 上游 429 + code 6021
+// 「queue.full.title」是**按模型**的排队/满载（不是账号问题，也不是渠道级）：
+//   - 零惩罚不变：不冷却 / 不熔断 / 不喂连败（2026-10-15 实案：按限流逐号软冷却，
+//     2 秒绞杀整池健康号）；
+//   - **命中即终止轮转**，不回 503，按 429 + Retry-After 透传排队语义。
 //
-// 端到端断言：两号各打一次、429 + upstream_busy + 上游原文在场、Retry-After 兜底
-// 5 秒、账号零惩罚。
-func TestChatQueueFullRotatesThen429WithoutPenalty(t *testing.T) {
+// 为什么不再换号：2026-11-02 10:43–10:48 的生产窗口里，同一批账号上
+// deepseek-v4.1-flash 139 条全部 200，而 glm-5.3 / kimi-k3.1-pro 的 14 条全部
+// 6020/6021、全部 attempts=3（三个不同号都撞墙）、耗时 3.4–5.1s。同一模型换号
+// 一次都救不回来，轮转只是把 ~1 秒的失败拖成 3.5 秒。本用例钉住「第二个号没有
+// 被调用」——这正是省下来的那两轮必然失败的上游请求。
+func TestChatQueueFullStopsRotationOnFirstHit(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls[authz]++
@@ -220,8 +216,11 @@ func TestChatQueueFullRotatesThen429WithoutPenalty(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("code=%d body=%s (want 429：排队语义原样透传，客户端按 Retry-After 重试)", rec.Code, rec.Body)
 	}
-	if calls["Bearer at-busy1"] != 1 || calls["Bearer at-busy2"] != 1 {
-		t.Errorf("calls=%v want 两号各 1 次（请求内轮转，tried 不重复选号）", calls)
+	if calls["Bearer at-busy1"] != 1 {
+		t.Errorf("calls=%v want busy1 恰好 1 次", calls)
+	}
+	if calls["Bearer at-busy2"] != 0 {
+		t.Errorf("calls=%v want busy2 **0** 次（模型级排队换号无效，不得继续轮转）", calls)
 	}
 	if ra := rec.Header().Get("Retry-After"); ra != "5" {
 		t.Errorf("Retry-After=%q want 5（上游未给 data.retry_after 时的本地兜底）", ra)
@@ -236,10 +235,13 @@ func TestChatQueueFullRotatesThen429WithoutPenalty(t *testing.T) {
 	if strings.Contains(body, "no_healthy_account") {
 		t.Errorf("channel-busy 不得报成账号耗尽: %s", body)
 	}
-	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal。
-	st, _ := p.Status("busy1")
-	if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 {
-		t.Errorf("ErrUpstreamBusy must not penalize account: %+v", st)
+	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal。两个号都要查——
+	// 只查 busy1 会漏掉「轮转把 busy2 也惩罚了」这种偏差。
+	for _, uid := range []string{"busy1", "busy2"} {
+		st, _ := p.Status(uid)
+		if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 {
+			t.Errorf("%s: ErrUpstreamBusy must not penalize account: %+v", uid, st)
+		}
 	}
 }
 

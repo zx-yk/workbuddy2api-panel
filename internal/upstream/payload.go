@@ -459,29 +459,36 @@ func normalizeToolChoice(obj map[string]any) {
 	}
 }
 
-// normalizeToolPatterns 归一化 tools 子树里 pattern 的非标准转义 `\_`（→ `_`）。
+// normalizeToolPatterns 归一化 tools 声明，两件事：
+//  1. pattern / patternProperties 里 `\_` → `_`（JSON Schema 正则的转义兼容）；
+//  2. 丢弃上游必然整单拒绝的条目（见 validToolName 与下面的服务端工具声明）。
 //
-// 上游对 tools[].function.parameters 做严格 JSON Schema/正则文法校验，pattern 含
-// `\_`（转义的字面量下划线）会整体拒收：400 code=11129 invalid_function_call_
-// parameters（displayMsg「工具定义不合规」）。`\_` 不是任何正则文法的合法转义，
-// 但所有主流引擎（RE2/PCRE/JS Annex B）都宽容地视为 `_` 本身——上游校验器比它们
-// 全部更严（对照 V8 严格文法 u 标志，唯一同样拒绝的实现）。实案：ZCode 的 exa 插件
-// agent_run 工具 runId/previousRunId 带 `^agent\_run\_`，deepseek 系全家确定性 400
-// → 网关侧归 ErrClient 只换号不罚但喂连败计数 → 轮转烧满 5 连败触发连败降权、
-// 客户端 503（2026-09-29/30 两次实案）。schema 级拒绝换账号无用，只能在发送前修。
+// 第 2 条的判据来自上游的实错：tools[N].function.name 不合格时整条请求 400
+// （code 11133，extError.param 直指该路径，message 是「the request parameters
+// were rejected by the model provider」）。触发形态有四类：
+//   - 客户端把服务端工具声明（如 {"type":"web_search"}，没有 function 层、也没有
+//     name）与普通 function 工具一起发；
+//   - name 为空；
+//   - name 超过 64 字节；
+//   - name 含 [A-Za-z0-9_-] 之外的字符（点号/斜杠/CJK/空格）。
 //
-// 归一无损：`\_` 与 `_` 在所有引擎匹配语义相同（各引擎实测 + 上游对照探针：归一后
-// 200），工具方功能不变。只动 tools 子树（pattern 值 + patternProperties 键）；
-// 消息正文里的 `\_`（如 Windows 路径 C:\_x）不碰。其余非标转义（`\:` 等）未证实
-// 触发，不扩面——有实案再议。独立于 sanitize 开关：这是「让请求通过」，不是脱敏。
+// 四类都**整条丢弃**，不改写成合法值：改名会让模型吐出的 tool_calls 名字与客户端
+// 声明对不上，把一次显式 400 换成一次静默失效的工具——后者更难排查。
+//
+// 丢弃是 best-effort 且可观测：只丢真正不合格的条目，合法条目原样保留；重名只留
+// 第一条（上游按名索引）；全部被丢时删掉 tools 键；有丢弃就落一行 WARN 带原因。
 func normalizeToolPatterns(obj map[string]any) {
 	rawTools, ok := obj["tools"].([]any)
 	if !ok {
 		return
 	}
+	kept := make([]any, 0, len(rawTools))
+	seen := make(map[string]struct{}, len(rawTools))
+	var dropped []string
 	for _, raw := range rawTools {
 		tool, ok := raw.(map[string]any)
 		if !ok {
+			dropped = append(dropped, "non-object")
 			continue
 		}
 		// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
@@ -489,7 +496,64 @@ func normalizeToolPatterns(obj map[string]any) {
 			unescapePatternLiteralEscapes(fn["parameters"])
 		}
 		unescapePatternLiteralEscapes(tool["parameters"])
+
+		name, ok := toolName(tool)
+		if !ok {
+			dropped = append(dropped, "no-name")
+			continue
+		}
+		if !validToolName(name) {
+			dropped = append(dropped, "bad-name:"+name)
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			dropped = append(dropped, "dup:"+name)
+			continue
+		}
+		seen[name] = struct{}{}
+		kept = append(kept, raw)
 	}
+	if len(dropped) == 0 {
+		return
+	}
+	if len(kept) == 0 {
+		delete(obj, "tools")
+	} else {
+		obj["tools"] = kept
+	}
+	log.Printf("WARN: [upstream] dropped %d unusable tool(s): %s",
+		len(dropped), strings.Join(dropped, ", "))
+}
+
+// toolName 取 tools 条目的名字：优先 function.name（OpenAI 形态），其次裸 name
+// （Anthropic 形态经入口层转换后的残形）。都没有/为空即 false。
+func toolName(tool map[string]any) (string, bool) {
+	if fn, ok := tool["function"].(map[string]any); ok {
+		n, _ := fn["name"].(string)
+		return n, n != ""
+	}
+	n, _ := tool["name"].(string)
+	return n, n != ""
+}
+
+// validToolName 上游 tools[].function.name 的接受域：1..64 字节，只含
+// [A-Za-z0-9_-]。越界即整单 400（code 11133），见 normalizeToolPatterns 注释。
+//
+// 按字节而不是 rune 判长：合法名字都是 ASCII，非 ASCII 名字在上面的字符集判定
+// 里已经先被拒了，这里只负责长度上界。
+func validToolName(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties

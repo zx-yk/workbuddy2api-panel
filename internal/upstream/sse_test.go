@@ -45,7 +45,10 @@ func TestPrepareBodyForcesStream(t *testing.T) {
 }
 
 func TestPrepareBodyToolChoiceFunctionObject(t *testing.T) {
-	out := PrepareBodyOpt([]byte(`{"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function"}]}`), true)
+	// tools 里放一条**合法**声明：本用例验的是 tool_choice 对象→字符串，tools 只是
+	// 陪衬。原来的夹具是 `{"type":"function"}`（无 name），那形态现在会被
+	// normalizeToolPatterns 丢弃——上游按 tools[N].function.name 校验，缺名整单 400。
+	out := PrepareBodyOpt([]byte(`{"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather"}}]}`), true)
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["tool_choice"] != "get_weather" {

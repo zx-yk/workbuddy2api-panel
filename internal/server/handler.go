@@ -1185,33 +1185,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			// 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/满载：
+			// 6020「queue.waiting.title」/ 6021「queue.full.title」排队/满载：
 			// **零惩罚不变**（不冷却/不熔断/不喂连败——按限流处置会逐号软冷却，实测
-			// 2 秒绞杀整池健康号，2026-10-15 实案），但恢复**请求内轮转**，末端按
+			// 2 秒绞杀整池健康号，2026-10-15 实案），且**命中即终止轮转**，按
 			// 429 + Retry-After 透传排队语义（见末端 ErrUpstreamBusy 分支）。
 			//
-			// 为什么轮转回来了：排队可用性是**间歇的**——2026-10-28 生产实案同一分钟
-			// 内既有 6021 也有成功、几分钟后同号即恢复；一次性 fail-fast 把几秒的抖动
-			// 直接交给客户端。队列按账号类型全局共享，换号绕不过排队本身，轮转的价值
-			// 不在「绕过」而在空窗不再逐请求致命，代价是 MaxRotate 次上游调用。
+			// 为什么不再换号（v1.16.5 曾改成请求内轮转，此处回退）：排队是**按模型**
+			// 分的，不是渠道级。2026-11-02 10:43–10:48 的五分钟里，同一批账号上
+			// deepseek-v4.1-flash 139 条全部 200，而 glm-5.3 / kimi-k3.1-pro 的 14 条
+			// 全部 6020/6021，且全部 attempts=3（三个不同号都撞墙）、耗时 3.4–5.1s。
+			// 同一模型换号一次都救不回来，轮转只是把 ~1 秒的失败拖成 3.5 秒，顺带多
+			// 打两轮必然失败的上游请求。模型级排队只能等，或让客户端换模型。
 			//
-			// 为什么末端回 429 而不是 503：上游对这两个形态本身回的就是 429（6020 还
-			// 带 data.retry_after=40），网关改写 503 等于把「稍后再试」翻译成「服务
-			// 不可用」——按 SDK 语义 429 带 Retry-After 会自动睡后重发，503 有客户端
-			// 直接中断任务（2026-10-28 实案）。
+			// 保留 429 而不是回到 503：上游对这两个形态本身回的就是 429（6020 带
+			// data.retry_after），改写 503 等于把「稍后再试」翻译成「服务不可用」——
+			// SDK 见 429+Retry-After 会自动睡后重发，见 503 有客户端直接中断任务
+			// （2026-10-28 实案）。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-				// 排队/满载与账号无关：只释放本次租约、保留会话绑定；绑定号撞上时
-				// 本轮即使用别的号代理成功也不改绑（排队是全局的，下轮仍走原号）。
-				if stickyUID != "" && acct.UID == stickyUID {
-					preserveCapacityBinding = true
-				}
+				// 排队/满载与账号无关：只释放本次租约、保留会话绑定（不必改绑，
+				// 下轮仍走原号——队列是模型级的，换号不换队列）。
 				releaseHeld()
-				if !rotateBackoff(i, r.Context()) {
-					break // ctx 取消：终止轮转（排队满载换号退避）
-				}
-				continue
+				break
 			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
@@ -1523,7 +1519,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
 		case upstream.ErrUpstreamBusy:
-			// 6020/6021 渠道级排队/满载（轮转已耗尽：本请求每个号都撞同一堵墙）。
+			// 6020/6021 排队/满载（命中即终止轮转：该模型此刻全池同撞一堵墙）。
 			// 回 429 + Retry-After 而不是 503——上游对这两个形态本身回的就是 429
 			// （6020 带 data.retry_after），透传原状态让下游按 OpenAI 限流语义自助
 			// 重试；上游原文（requestId / queue_position）仍在 message 原样透传
