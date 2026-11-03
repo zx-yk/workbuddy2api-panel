@@ -308,3 +308,35 @@ func fingerprintTestClient(t *testing.T, srv *httptest.Server) *http.Client {
 	t.Cleanup(tr.CloseIdleConnections)
 	return &http.Client{Transport: tr}
 }
+
+// officialJA3IPTarget 一手抓包（桌面端 Electron/BoringSSL 运行时，目标为 IP）：
+// 没有 SNI，所以扩展段以 23 开头、共 9 项。用来证明「同一个 ClientHello 在
+// 有无 SNI 两种目标下都与官方一致」，而不是只在一种场景下凑对了。
+const officialJA3IPTarget = "771,4865-4866-4867-49199-49195-49200-49196-49191-52393-52392-49161-49171-49162-49172-156-157-47-53,23-65281-10-11-35-13-51-45-43,29-23-24,0"
+
+// TestOfficialClientHelloAgainstIPTargetMatchesCapture 对 IP 目标拨号时，我们的
+// 握手必须与一手抓包逐字节相同：SNI 扩展被省略，其余 9 项顺序不变。
+func TestOfficialClientHelloAgainstIPTargetMatchesCapture(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer srv.Close()
+
+	ja3c := make(chan string, 1)
+	go func() {
+		if ja3, err := readJA3(srv); err == nil {
+			ja3c <- ja3
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() { _, _ = handshakeOfficialHello(ctx, cli, "127.0.0.1") }()
+
+	select {
+	case got := <-ja3c:
+		if got != officialJA3IPTarget {
+			t.Fatalf("对 IP 目标的握手与一手抓包不一致\n got=%s\nwant=%s", got, officialJA3IPTarget)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时：没有读到 ClientHello")
+	}
+}
