@@ -1542,6 +1542,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 14003 是暂时性容量窗口。若全池仅剩该模型的容量冷却，下方
 			// modelBlock 分支补充最早恢复时间；混合其他模型冷却时仍按保守的
 			// model_unavailable 处理，不把确定性不可用误报成短暂繁忙。
+			// 回 429 而不是 503：上游对它本身回的就是 429，语义是「稍后再试」。
+			// 网关改写 503 会被部分客户端当成「服务不可用」而中断任务，只有
+			// 429 + Retry-After 才会按 SDK 的退避语义自动重试（与 6020/6021 同口径）。
+			status = http.StatusTooManyRequests
 			code = "model_busy"
 			msg = "model capacity is temporarily busy; retry after a short wait"
 		case upstream.ErrModelBlocked:
@@ -1568,8 +1572,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
 		if modelBlock.Capacity {
-			// 全池只剩 14003 容量短窗口：这是可重试的 503，不是模型永久不可用。
-			status = http.StatusServiceUnavailable
+			// 全池只剩 14003 容量短窗口：可重试，但不是模型永久不可用。
+			//
+			// 用 429 而非 503：14003 是「这一刻这个模型没容量」，上游自己回的也是 429；
+			// 503 会被部分客户端判定为服务端故障并中断任务，而 429 + Retry-After 会按
+			// SDK 退避语义重试（等待口径取容量窗口最早恢复时间，上方已设）。
+			status = http.StatusTooManyRequests
 			code = "model_busy"
 			if !upstreamMsgPassed {
 				msg = "model capacity is temporarily busy on every account; retry after a short wait"

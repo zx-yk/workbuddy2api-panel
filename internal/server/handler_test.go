@@ -342,7 +342,7 @@ func TestChatModelBusyKeepsStickyAcrossTemporaryProxy(t *testing.T) {
 	}
 }
 
-func TestChatModelBusyAllCapacityReturnsRetryable503(t *testing.T) {
+func TestChatModelBusyAllCapacityReturnsRetryable429(t *testing.T) {
 	calls := 0
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -362,7 +362,9 @@ func TestChatModelBusyAllCapacityReturnsRetryable503(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-capacity-terminal"}}`)))
-	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "2" {
+	// 429 而非 503：14003 是「这一刻没容量」，按限流语义 + Retry-After 让 SDK 退避重试；
+	// 503 会被部分客户端当成服务端故障直接中断任务。
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "2" {
 		t.Fatalf("code=%d Retry-After=%q body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
 	}
 	if !strings.Contains(rec.Body.String(), "model_busy") || strings.Contains(rec.Body.String(), "model_unavailable") {
