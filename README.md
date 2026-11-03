@@ -37,12 +37,45 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.10-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.11-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.11 · 2026-11-04
+
+本版做两件事：把出站 TLS 的握手指纹对齐到官方桌面端，并修正 14003 的处理口径。
+新增一个纯 Go 依赖（uTLS，无 cgo），镜像体积会略增；其余无配置变更，替换二进制即可。
+
+- **出站 TLS ClientHello 复刻官方桌面端**：这是指纹对齐全链条里唯一「上游必然可见」
+  的一层——头顺序、body 键序在服务端反序列化之后都不存在，中间设备不解密时也只能看
+  包长，而 ClientHello 是明文，可以直接算 JA3/JA4。Go 标准库默认是 13 个 cipher、
+  11 个扩展的另一族形态，一次 JA4 就能筛出来。现改为手工构造的官方形态：18 个
+  cipher（TLS 1.3 三个套件排最前，与 Go 默认相反）、10 个扩展、**不发 ALPN、不发
+  padding**，JA3 md5 `71dc8c533dd919ae9f4963224a4ba8fd`。不发 ALPN 与既有的「禁
+  h2」策略一致：不协商 h2 就不该在握手时声明它。
+  证书校验沿用标准库语义（不跳过验证），握手超时自行兜底（`Transport` 的
+  `TLSHandshakeTimeout` 不作用于自定义拨号）。**配了出站代理时不启用**——自定义
+  拨号会让 `net/http` 跳过代理直连目标，那时宁可退回 Go 原生形态也不能绕过代理。
+  启动日志会打印当前生效的形态，出问题第一眼看那一行。
+
+- **请求体顶层键序对齐官方插入序**：此前经 `map` 中转，Go 一律按字母序输出，
+  `model` 落到 `max_tokens` 之后、`messages` 被提到最前。现按官方顺序重排顶层成员，
+  纯字节搬运，报文长度与语义都不变（值里的字符串、嵌套结构一个字节不动），未列入
+  官方序的字段按原相对序跟在后面。
+
+- **流式响应关闭前读掉流尾**：SSE 在 `data: [DONE]` 处就停止读取，而结束块在它之后；
+  原先先取消请求上下文再关闭，`net/http` 判定 body 未读完，直接丢弃连接——每条流式
+  请求都要重做一次 TCP + TLS 握手。连接池按账号分桶之后这层开销更明显。现改为
+  「停监控 → 限时读掉流尾（4KB / 100ms）→ 取消 → 关闭」，`Close` 幂等。
+
+- **14003 按「模型级速率窗口」处理**：上游对它的文案就是「换模型或稍后再试」，
+  同一个号换模型立即可用。两处修正：末端状态码由 503 改为 429 + `Retry-After`
+  （503 会被部分客户端当成服务端故障直接中断任务）；换号时不再插入轮转退避——
+  下一次尝试打的是另一个账号，等待不减少任何单账号的信令，只会把「换号即成功」
+  拖成秒级。冷却口径不变，仍只避让该 (账号, 模型) 的短窗口。
 
 ### v1.16.10 · 2026-11-03
 
@@ -726,7 +759,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.10` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.11` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -738,17 +771,17 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.10-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.10-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.10-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.10-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.10-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.11-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.11-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.11-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.11-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.11-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
 
 ```bash
-V=1.16.10
+V=1.16.11
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/wb2api-panel-v${V}-linux-amd64.tar.gz
 curl -LO https://github.com/zx-yk/workbuddy2api-panel/releases/download/v${V}/checksums.txt
 grep 'linux-amd64' checksums.txt > /tmp/sums && sha256sum -c /tmp/sums
