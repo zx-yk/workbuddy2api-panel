@@ -77,7 +77,7 @@ func newDialer() *net.Dialer {
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
 func newTransport() *http.Transport {
 	dialer := newDialer()
-	return &http.Transport{
+	tr := &http.Transport{
 		DialContext: dialer.DialContext,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
@@ -91,6 +91,10 @@ func newTransport() *http.Transport {
 		// 自动读取环境变量中的代理配置
 		Proxy: http.ProxyFromEnvironment,
 	}
+	// TLS 层与官方客户端同形（见 tlsfingerprint.go）：有代理时不装——
+	// 自定义 DialTLSContext 会让 net/http 跳过代理直连目标。
+	attachTLSDialer(tr, dialer)
+	return tr
 }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、
@@ -189,6 +193,8 @@ func (t *uidTransport) forUID(uid string) *http.Transport {
 	tr := newTransport()
 	if t.dial != nil {
 		tr.DialContext = t.dial.DialContext
+		// TLS 拨号必须跟同一个 dialer 走，否则超时/keepalive 两套口径。
+		attachTLSDialer(tr, t.dial)
 	}
 	if t.respHeaderTimeout > 0 {
 		tr.ResponseHeaderTimeout = t.respHeaderTimeout
@@ -234,6 +240,7 @@ func (t *uidTransport) SetDialer(d *net.Dialer) {
 	t.dial = d
 	for _, tr := range t.m {
 		tr.DialContext = d.DialContext
+		attachTLSDialer(tr, d)
 	}
 }
 

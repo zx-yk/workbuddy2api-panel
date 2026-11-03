@@ -138,6 +138,14 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 出站 TLS 形态（见 upstream/tlsfingerprint.go）：默认复刻官方桌面端
+	// ClientHello（JA3 md5 71dc8c53…）。配了出站代理时改为 Go 原生形态——
+	// net/http 一旦看到自定义 DialTLSContext 就会跳过代理直连目标。
+	if upstream.TLSFingerprintActive() {
+		log.Printf("TLS: 出站 ClientHello 复刻官方桌面端（JA3 md5 %s）", upstream.OfficialJA3MD5)
+	} else {
+		log.Printf("TLS: 检测到出站代理，ClientHello 用 Go 原生形态（自定义拨号会绕过代理）")
+	}
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
