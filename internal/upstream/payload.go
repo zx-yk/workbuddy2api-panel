@@ -120,7 +120,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if err != nil {
 		return src
 	}
-	return out
+	// 顶层键序对齐官方客户端插入序（见 keyorder.go）：纯字节重排，长度与语义不变。
+	return reorderTopLevelKeys(out, officialTopLevelOrder)
 }
 
 // normalizeStop 把 `stop` 归一成数组。
@@ -430,7 +431,7 @@ func ensureConsoleSystem(body []byte) []byte {
 	if err != nil {
 		return body
 	}
-	return out
+	return reorderTopLevelKeys(out, officialTopLevelOrder)
 }
 
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
