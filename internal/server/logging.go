@@ -67,6 +67,11 @@ type chatStat struct {
 	hasCache  bool
 	// upstreamCode 上游业务错误码（仅 4xx/5xx 填充），供请求日志定位失败原因。
 	upstreamCode int
+	// 6020/6021 的排队观测：queuePos = 上游给的排位（-1 = 没给），
+	// queueRetrySec = 上游建议的首次等待秒数。只在 6020/6021 时非零，
+	// 用于回答「这个模型排队到底要等多久」，而不是凭一次 429 猜。
+	queuePos      int
+	queueRetrySec int
 
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
@@ -480,6 +485,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
 		e.UpstreamCode = s.upstreamCode
+		e.QueuePosition = s.queuePos
+		e.QueueRetryAfterSec = s.queueRetrySec
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

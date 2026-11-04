@@ -269,10 +269,18 @@ var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
 // SoftRateResetLoc 暴露重置时间的固定时区（供测试构造/断言同一时区口径）。
 func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 
-// modelRateLimitCode 明确指向「模型级 429 限流」的业务 code。
-// 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
-// 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
-const modelRateLimitCode = "6004"
+// 模型级限流码族（照官方客户端 codebuddy-lite-wb.mjs 的错误码枚举）：
+//
+//	6001 TPS  每秒 token     6005 RPS 每秒请求
+//	6002 TPM  每分钟 token   6006 RPM 每分钟请求
+//	6003 TPH  每小时 token   6007 RPH 每小时请求
+//	6004 TPD  每日 token     6008 RPD 每日请求
+//
+// 它们全部是**按模型**的限额，不是账号整体被限（issue #31 首次只认出 6004）。
+// 只认 6004 的后果：6001/6002/6003/6005/6006/6007 会落到 status==429 的
+// 账号级兜底，把一个「换个模型就能用」的信号罚成整号软冷却——白扔一个健康号
+// 的全部模型。扩族的依据是官方枚举，不是猜测；现网实测只见过 6000/6004。
+const modelRateLimitCodeFamily = `600[1-8]`
 const modelUsageLimitCode = "6000"
 const modelSwitchModelHint = "切换其他模型"
 
@@ -285,7 +293,9 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	// 尾部要求紧跟 , } ] —— 否则 "code":60010 会被当成 6001 命中（Go 的 regexp
+	// 没有 lookahead，只能用「后继分隔符」表达数字边界）。
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCodeFamily + `"?\s*[,}\]]`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -294,32 +304,97 @@ var (
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
 // IsModelRateLimit 报告 429 body 是否明确指向模型级限流。
-// 6004 始终为模型级；6000 必须同时含“切换其他模型”提示，否则仍为账号级。
+// 6001–6008 全族始终为模型级；6000 必须同时含"切换其他模型"提示，否则仍为账号级
+// （6000 是 Craft 总限额，缺提示时可能表达的是账号级用量）。
 func IsModelRateLimit(body string) bool {
 	return reModelRateLimit.MatchString(body) ||
 		(hasBusinessCode(body, modelUsageLimitCode) && strings.Contains(body, modelSwitchModelHint))
+}
+
+// ModelRateLimitCode 取 body 里命中的模型级限流码（6001–6008 / 带提示的 6000），
+// 取不到返回 0。用于给冷却台账写上**实际**码而不是恒写 6004——reason 是面板与
+// quota 判定（isQuotaReason）的唯一依据，写错码会把瞬时速率限流误判成日配额。
+func ModelRateLimitCode(body string) int {
+	code := BusinessCode([]byte(body))
+	if code >= 6001 && code <= 6008 {
+		return code
+	}
+	if code == 6000 && strings.Contains(body, modelSwitchModelHint) {
+		return code
+	}
+	return 0
 }
 
 // IsModelBusy 报告上游是否明确返回 14003 模型容量繁忙。
 // 只认结构化业务码，避免 requestId 等字段中的数字造成误判；6004 仍保持模型限流语义。
 func IsModelBusy(body string) bool { return hasBusinessCode(body, "14003") }
 
-// QueueRetryAfter 解析 6020/6021 响应体 data.retry_after（秒）。
+// queueFields 6020/6021 回应体里的排队信息。
+type queueFields struct {
+	Position   int
+	RetryAfter time.Duration
+	HasPos     bool
+	HasRetry   bool
+}
+
+// parseQueueFields 从 6020/6021 回应体里取 queue_position / retry_after。
+//
+// 官方客户端有两处读法：渲染层直接读错误数据，主进程先取 data、再看 data.data。
+// 这里按「顶层 → data → data.data」依次下钻，两处都能覆盖。
+// 字段值可能是数字，也可能是纯数字字符串（官方按 JS 乘法取值，两种都认）。
+func parseQueueFields(body string) queueFields {
+	var out queueFields
+	var root map[string]any
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return out
+	}
+	node := root
+	for depth := 0; node != nil && depth < 3; depth++ {
+		if v, ok := queueNumber(node["queue_position"]); ok {
+			out.Position, out.HasPos = int(v), true
+		}
+		if v, ok := queueNumber(node["retry_after"]); ok {
+			out.RetryAfter, out.HasRetry = time.Duration(v*float64(time.Second)), true
+		}
+		if out.HasPos && out.HasRetry {
+			break
+		}
+		node, _ = node["data"].(map[string]any)
+	}
+	return out
+}
+
+// queueNumber 取非负数值：JSON number 或纯数字字符串。
+func queueNumber(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, n >= 0
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f, err == nil && f >= 0
+	}
+	return 0, false
+}
+
+// QueueRetryAfter 解析 6020/6021 回应体的 retry_after（秒）。
 // 缺失、非正数、非 JSON 或超过 10 分钟的异常值均返回 0，由调用方使用默认短等待。
 func QueueRetryAfter(body string) time.Duration {
-	var env struct {
-		Data struct {
-			RetryAfter float64 `json:"retry_after"`
-		} `json:"data"`
-	}
-	if json.Unmarshal([]byte(body), &env) != nil || env.Data.RetryAfter <= 0 {
+	f := parseQueueFields(body)
+	if !f.HasRetry || f.RetryAfter <= 0 || f.RetryAfter > 10*time.Minute {
 		return 0
 	}
-	d := time.Duration(env.Data.RetryAfter * float64(time.Second))
-	if d <= 0 || d > 10*time.Minute {
-		return 0
+	return f.RetryAfter
+}
+
+// QueuePosition 解析 6020 回应体里的排位；没给返回 -1。
+// 用途是**观测**：把它写进请求日志，积累「6020 时队列有多长、retry_after 多大」，
+// 才能判断网关内排队（官方查 /v2/chat/queue/status 到号重发）是否值得做。
+func QueuePosition(body string) int {
+	f := parseQueueFields(body)
+	if !f.HasPos || f.Position < 0 {
+		return -1
 	}
-	return d
+	return f.Position
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。

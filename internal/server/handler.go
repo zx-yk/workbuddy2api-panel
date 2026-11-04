@@ -1069,6 +1069,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游业务码落请求日志：下次出现同类 400 时，`upstream_code` 直接给出
 			// 11101/11128/6004 这类判据，不用再翻容器日志或别家网关的日志。
 			st.upstreamCode = upstream.BusinessCode(respBody)
+			// 6020/6021 的排队信息落日志：`queue_position` 是判断「排队到底要等多久」
+			// 的唯一一手数据——决定要不要在网关内等（官方客户端会查
+			// /v2/chat/queue/status 到号重发），而不是只凭一次 429 猜。没有这列，
+			// 「命中即 429」和「排队等 ready」哪个对，永远只能靠外部推断。
+			if st.upstreamCode == 6020 || st.upstreamCode == 6021 {
+				st.queuePos = upstream.QueuePosition(string(respBody))
+				st.queueRetrySec = int(upstream.QueueRetryAfter(string(respBody)).Seconds())
+			}
 			var kind upstream.ErrKind
 			if uerr != nil {
 				kind = uerr.Kind
@@ -1899,10 +1907,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			resetAt = time.Now().Add(uerr.RetryAfter)
 		}
 		if upstream.IsModelRateLimit(body) && model != "" {
-			reason := "6004 model rate limit"
-			if strings.Contains(body, "6000") {
-				reason = "6000 model rate limit"
+			// reason 写**实际**命中的码：它同时是面板展示文案与 pool.isQuotaReason
+			// 的判定依据（6000/6004 视为日配额，其它视为瞬时速率）。此前恒写 6004，
+			// 扩族后 6001–6008 会被一并误标成日配额，把「秒级速率窗口」当成
+			// 「等到次日」处理。
+			code := upstream.ModelRateLimitCode(body)
+			if code == 0 {
+				code = 6004 // 只命中正则、取不到数字码时的历史兜底
 			}
+			reason := fmt.Sprintf("%d model rate limit", code)
 			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, reason)
 			return
 		}

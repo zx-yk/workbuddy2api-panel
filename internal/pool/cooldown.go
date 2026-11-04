@@ -466,11 +466,16 @@ type ModelBlockStatus struct {
 	QuotaOnly bool
 }
 
-// isQuotaReason 报告模型级冷却原因是否属于用量配额（6004/6000 家族）。
-// 原因字符串由 applyErrorPolicy 写入（"6004 model rate limit" / "6000 model rate limit"）。
+// isQuotaReason 报告模型级冷却原因是否属于**日级用量配额**（6000 / 6004 TPD /
+// 6008 RPD）。原因字符串由 applyErrorPolicy 写入（"6004 model rate limit" 等）。
+//
+// 只收日级码：6001/6002/6003/6005/6006/6007 是秒/分/小时级瞬时速率窗口，
+// 几分钟就能自愈，按日配额处理会把模型锁到次日，属于过度冷却。
 func isQuotaReason(reason string) bool {
 	reason = strings.TrimSpace(reason)
-	return strings.HasPrefix(reason, "6004") || strings.HasPrefix(reason, "6000")
+	return strings.HasPrefix(reason, "6004") ||
+		strings.HasPrefix(reason, "6008") ||
+		strings.HasPrefix(reason, "6000")
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。

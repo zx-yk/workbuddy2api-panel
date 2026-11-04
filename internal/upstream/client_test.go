@@ -163,7 +163,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（6001–6008 码族 + 带提示的 6000）。
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {
 		body string
@@ -175,6 +175,18 @@ func TestIsModelRateLimit(t *testing.T) {
 		{`{"code":6000,"msg":"模型用量已达上限，请切换其他模型"}`, true},
 		{`{"code": "6000", "msg": "请切换其他模型"}`, true},
 		{`{"code":6000,"msg":"model usage limit exceeded"}`, false},
+		// 6001–6008 全族：官方枚举里都是「按模型」的限额，换模型即可用。
+		{`{"code":6001,"msg":"tps limit"}`, true},
+		{`{"code":6002,"msg":"tpm limit"}`, true},
+		{`{"code":6003,"msg":"tph limit"}`, true},
+		{`{"code":6005,"msg":"rps limit"}`, true},
+		{`{"code":6006,"msg":"rpm limit"}`, true},
+		{`{"code":6007,"msg":"rph limit"}`, true},
+		{`{"code":6008,"msg":"rpd limit"}`, true},
+		{`{"code":"6005","msg":"rps limit"}`, true},
+		// 数字边界：60010 不是 6001，不能被子串误命中。
+		{`{"code":60010,"msg":"x"}`, false},
+		{`{"code":16004,"msg":"x"}`, false},
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
@@ -182,6 +194,28 @@ func TestIsModelRateLimit(t *testing.T) {
 	for _, c := range cases {
 		if got := IsModelRateLimit(c.body); got != c.want {
 			t.Errorf("IsModelRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestModelRateLimitCode 取实际命中的码：reason 要写真实码，不能恒写 6004
+// （6004 代表日配额、6001 代表秒级速率，混写会把瞬时窗口锁到次日）。
+func TestModelRateLimitCode(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"code":6004,"msg":"x"}`, 6004},
+		{`{"code":6001,"msg":"x"}`, 6001},
+		{`{"code":6008,"msg":"x"}`, 6008},
+		{`{"code":6000,"msg":"请切换其他模型"}`, 6000},
+		{`{"code":6000,"msg":"model usage limit exceeded"}`, 0},
+		{`{"code":11140,"msg":"x"}`, 0},
+		{`not json`, 0},
+	}
+	for _, c := range cases {
+		if got := ModelRateLimitCode(c.body); got != c.want {
+			t.Errorf("ModelRateLimitCode(%q)=%d want %d", c.body, got, c.want)
 		}
 	}
 }
@@ -750,10 +784,37 @@ func TestQueueRetryAfter(t *testing.T) {
 		{`{"code":6021,"data":{"retry_after":601}}`, 0},
 		{`{"code":6021,"data":{}}`, 0},
 		{`not json`, 0},
+		// 官方两处读法不同：渲染层直接读错误数据（顶层），主进程先取 data 再取
+		// data.data。三种位置都必须能读到。
+		{`{"code":6020,"retry_after":7}`, 7 * time.Second},
+		{`{"code":6020,"data":{"data":{"retry_after":7}}}`, 7 * time.Second},
+		{`{"code":6020,"data":{"retry_after":"7"}}`, 7 * time.Second},
 	}
 	for _, tc := range cases {
 		if got := QueueRetryAfter(tc.body); got != tc.want {
 			t.Errorf("QueueRetryAfter(%s)=%v want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestQueuePosition 排位解析（观测字段）：没给返回 -1，不能用 0 冒充——
+// 0 是「排在第一」，与「上游没说」是两回事，混起来会把观测数据读反。
+func TestQueuePosition(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"code":6020,"data":{"queue_position":3,"retry_after":7}}`, 3},
+		{`{"code":6020,"queue_position":0,"retry_after":7}`, 0},
+		{`{"code":6020,"data":{"data":{"queue_position":12}}}`, 12},
+		{`{"code":6020,"data":{"queue_position":"5"}}`, 5},
+		{`{"code":6020,"data":{"retry_after":7}}`, -1},
+		{`{"code":6021,"data":{}}`, -1},
+		{`not json`, -1},
+	}
+	for _, tc := range cases {
+		if got := QueuePosition(tc.body); got != tc.want {
+			t.Errorf("QueuePosition(%s)=%d want %d", tc.body, got, tc.want)
 		}
 	}
 }
