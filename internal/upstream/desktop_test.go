@@ -179,7 +179,7 @@ func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
-	_, reqID, err := c.DesktopChatWithExpert(&auth.Auth{UID: "u-dt", AccessToken: "at", ExpiresAt: 9999999999}, "ex_test")
+	_, reqID, err := c.DesktopChatWithExpert(&auth.Auth{UID: "u-dt", AccessToken: "at", ExpiresAt: 9999999999}, "ex_test", false)
 	if err != nil {
 		t.Fatalf("DesktopChatWithExpert: %v", err)
 	}
@@ -282,5 +282,60 @@ func TestSetDomainHeaderBareHost(t *testing.T) {
 	setDomainHeader(h2, &auth.Auth{})
 	if _, ok := h2["X-Domain"]; ok {
 		t.Error("域为空时不该发 X-Domain")
+	}
+}
+
+// TestMarketExpertProtect 内容保护判定：云端专家（is_cloud=1）或付费资产
+// （pay_mode 非 0）才声明保护；字段缺失时落 0，不带头（官方对占位专家同样不带）。
+func TestMarketExpertProtect(t *testing.T) {
+	cases := []struct {
+		name string
+		e    MarketExpert
+		want bool
+	}{
+		{"云端单专家", MarketExpert{IsCloud: 1}, true},
+		{"付费资产", MarketExpert{PayMode: 2}, true},
+		{"云端且付费", MarketExpert{IsCloud: 1, PayMode: 1}, true},
+		{"免费且非云端", MarketExpert{IsCloud: 0, PayMode: 0}, false},
+		{"字段缺失（占位专家）", MarketExpert{}, false},
+	}
+	for _, c := range cases {
+		if got := c.e.Protect(); got != c.want {
+			t.Errorf("%s: Protect()=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDesktopChatWithExpertModerationHeader 声明保护时才发 X-Moderation-Type，
+// 且值是与官方一致的字母面量 `["protected"]`（安装包常量 Ok = '["protected"]'，
+// 不是 JSON 序列化出来的）。
+func TestDesktopChatWithExpertModerationHeader(t *testing.T) {
+	for _, protect := range []bool{false, true} {
+		var got string
+		var present bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, present = r.Header["X-Moderation-Type"]
+			got = hdrExact(r.Header, "X-Moderation-Type")
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"id\":\"cmb-0123456789abcdef0123456789abcdef\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"2\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		}))
+		srvURL := srv.URL
+		c := &Client{HTTP: srv.Client(), ChatBaseCN: srvURL}
+		if _, _, err := c.DesktopChatWithExpert(&auth.Auth{UID: "u-mod", AccessToken: "at", ExpiresAt: 9999999999}, "ex_mod", protect); err != nil {
+			srv.Close()
+			t.Fatalf("protect=%v: %v", protect, err)
+		}
+		srv.Close()
+
+		if !protect {
+			if present {
+				t.Errorf("protect=false 时不该发 X-Moderation-Type，实际 %q", got)
+			}
+			continue
+		}
+		if got != `["protected"]` {
+			t.Errorf("X-Moderation-Type=%q want [\"protected\"]", got)
+		}
 	}
 }

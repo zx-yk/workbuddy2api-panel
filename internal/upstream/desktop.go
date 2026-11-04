@@ -431,6 +431,21 @@ type MarketExpert struct {
 	ProfessionZH  string `json:"profession_zh"`
 	Version       string `json:"version"`
 	Categories    []any  `json:"categories"`
+	// IsCloud / PayMode 决定专家会话要不要带 X-Moderation-Type（见 Protect）。
+	// 官方在专家对象上就是这两个字段名（数字），读安装包确认：normalize 时
+	// `is_cloud: optionalNumber(t.is_cloud)`、`pay_mode: optionalNumber(t.pay_mode)`。
+	IsCloud int `json:"is_cloud"`
+	PayMode int `json:"pay_mode"`
+}
+
+// Protect 报告该专家会话是否需要声明内容保护（X-Moderation-Type: ["protected"]）。
+//
+// 官方 shouldProtectSession：云端专家（is_cloud === 1）或付费资产（pay_mode 非 0）
+// 即开启；另外还有「已启用技能里有云端技能」一路，网关的专家对话不加载技能，该路
+// 恒假。列表里没查到、或字段缺失（解析成 0）时返回 false——官方对占位专家也是
+// 不带头，宁缺不错。
+func (e MarketExpert) Protect() bool {
+	return e.IsCloud == 1 || e.PayMode != 0
 }
 
 // MarketExpertList 拉取专家市场真实专家列表（expertType: "agent" 单专家 / "team" 专家团）。
@@ -473,7 +488,11 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 // 解析**服务端返回的 requestId**（data.id，如 cmb-xxxx / 32hex）并返回。
 // expert_actual_use 等 JOIN 事件的 requestId 必须是该服务端 id——自造 UUID 不计数
 // （客户端 resolveRealRequestId 同款语义，Sunny row 2113 实证）。
-func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversationID, requestID string, err error) {
+//
+// protect 决定是否带 X-Moderation-Type: ["protected"]（云端/付费专家会话的内容保护
+// 声明，取 MarketExpert.Protect()）。列表里查不到该专家时传 false——官方对占位专家
+// 也不带头。
+func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string, protect bool) (conversationID, requestID string, err error) {
 	conversationID = session.NewConversationID()
 	body := map[string]any{
 		"model": "fast-model",
@@ -532,6 +551,11 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	setExact(h, "x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
+	}
+	// 内容保护声明：官方对云端或付费的专家会话加这一个头，值是字面量
+	// `["protected"]`（安装包常量 Ok = '["protected"]'，不是 JSON 序列化出来的）。
+	if protect {
+		setExact(h, "X-Moderation-Type", `["protected"]`)
 	}
 	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
 		fmt.Printf("[dbg] URL=%s\n", req.URL)
