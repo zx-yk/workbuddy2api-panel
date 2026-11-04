@@ -176,8 +176,10 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", c.userAgent(a))
-	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
-	req.Header.Set("X-CodeBuddy-Request", "1")
+	// x-codebuddy-request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
+	// 用 setExact 写**小写**键：Header.Set 会把键规范化成 `X-Codebuddy-Request`，
+	// 与官方线上的小写形态不一致；而两种写法各写一次会发出去两个同名头。
+	setExact(req.Header, "x-codebuddy-request", "1")
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
 	// 发对应语言标识，对齐避免上游风控按语言缺失误判。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
@@ -200,7 +202,7 @@ func acceptLanguageFor(a *auth.Auth) string {
 // injectCodeBuddyRequest 在 req 注入 X-CodeBuddy-Request: 1。
 // billing 域未走 CommonHeaders，单独注入保证全出站覆盖（D1）。
 func (c *Client) injectCodeBuddyRequest(req *http.Request) {
-	req.Header.Set("X-CodeBuddy-Request", "1")
+	setExact(req.Header, "x-codebuddy-request", "1")
 }
 
 // ChatMeta 一次 chat 出站的会话头族元数据（issue #35：后台按 X-Conversation-Request-ID
@@ -509,10 +511,10 @@ func (c *Client) injectAttribution(req *http.Request) {
 	// 通道（desktop.go 全部 SaaS）自相矛盾——同一客户端两条路径报出两个产品标识，
 	// 是可判别的内部不一致。
 	req.Header.Set("X-Product", "SaaS")
-	// x-codebuddy-request 是官方客户端的固定标记（抓包两条请求都带 "1"）。
-	// 此前只有专家会话流程（DesktopChatWithExpert）发，主 chat 路径漏了——
-	// 同一个账号的两种请求一个带一个不带，本身就是可判别的内部不一致。
-	setExact(req.Header, "x-codebuddy-request", "1")
+	// x-codebuddy-request 由 CommonHeaders 统一发（req.Header.Set 会把键规范化成
+	// `X-Codebuddy-Request`）。这里此前又用 setExact 补了一次小写键，结果是同一个
+	// 头以两种大小写各占一个 map 项、**发出去两个** —— 官方只发一个。HTTP 头名
+	// 大小写不敏感，服务端读到的形态一样，所以统一走 CommonHeaders 那处即可。
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。

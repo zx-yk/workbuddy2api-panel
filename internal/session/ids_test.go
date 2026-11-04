@@ -67,8 +67,10 @@ func TestNewConversationIDShape(t *testing.T) {
 	seen := make(map[string]bool)
 	for i := 0; i < 100; i++ {
 		id := NewConversationID()
-		if len(id) != 36 || id[14] != '4' || !strings.ContainsRune("89ab", rune(id[19])) {
-			t.Fatalf("NewConversationID() = %q, want UUID v4 shape", id)
+		// 版本位 7（UUIDv7）、variant 8/9/a/b，带连字符。
+		// 抓官方内置 CLI 实测：X-Conversation-ID = 01a1a770-b339-7b06-80ab-574f992a9397
+		if len(id) != 36 || id[14] != '7' || !strings.ContainsRune("89ab", rune(id[19])) {
+			t.Fatalf("NewConversationID() = %q, want UUID v7 shape", id)
 		}
 		for _, pos := range []int{8, 13, 18, 23} {
 			if id[pos] != '-' {

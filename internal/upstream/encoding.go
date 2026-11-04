@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"compress/flate"
 	"compress/gzip"
+	"compress/lzw"
 	"compress/zlib"
 	"errors"
 	"fmt"
@@ -76,9 +77,15 @@ func decodeResponseBody(resp *http.Response) (io.ReadCloser, error) {
 		if err == nil {
 			r, err = newDeflateReader(br)
 		}
+	case "compress":
+		// HTTP 的 compress 编码是 LZW（UNIX compress）。既然请求头里声明了它，
+		// 就必须能解——"声明支持但不实现"是比不支持更容易出事的状态：真返回时
+		// 上层会拿到压缩字节、JSON 直接解析失败。参数取 UNIX compress 的标准
+		// 形态（LSB-first，8 位字宽）。实际服务器几乎不会用这个编码，但成本是
+		// 一行，缺口的代价是一次请求直接挂掉。
+		r = lzw.NewReader(resp.Body, lzw.LSB, 8)
 	default:
-		// compress / zstd / 未知：原样返回。声明了不代表服务端会用；硬解反而
-		// 可能把可用的响应弄坏。
+		// zstd / 未知编码：原样返回。不硬解未知格式，避免把可用的响应弄坏。
 		return resp.Body, nil
 	}
 	if err != nil {

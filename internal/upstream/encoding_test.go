@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/lzw"
 	"compress/zlib"
 	"io"
 	"net/http"
@@ -29,6 +30,8 @@ func compressWith(t *testing.T, enc, plain string) []byte {
 		w = zlib.NewWriter(&buf)
 	case "deflate": // 裸 deflate 流（无 zlib 头）
 		w, err = flate.NewWriter(&buf, flate.DefaultCompression)
+	case "compress": // HTTP 的 compress = LZW（UNIX compress 形态）
+		w = lzw.NewWriter(&buf, lzw.LSB, 8)
 	case "identity":
 		return []byte(plain)
 	default:
@@ -62,7 +65,8 @@ func TestRoundTripAcceptEncodingAndDecode(t *testing.T) {
 		{"deflate-zlib", "deflate", "zlib"},
 		{"deflate-raw", "deflate", "deflate"},
 		{"identity", "", "identity"},
-		{"unknown-encoding 原样返回", "compress", "identity"},
+		{"compress-LZW", "compress", "compress"},
+		{"unknown-encoding 原样返回", "zstd", "identity"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

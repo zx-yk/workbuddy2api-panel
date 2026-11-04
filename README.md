@@ -37,12 +37,35 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.13-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.14-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.14 · 2026-11-05
+
+本版三处修正，都来自**实抓官方客户端出站字节**与网关出站逐项比对（内置 CLI 指向本地 mock，
+零上游调用）。无配置变更，替换二进制即可。
+
+**1. 会话 ID 的版本位改成 UUIDv7**
+
+官方 `X-Conversation-ID` 是时间戳打头的 UUIDv7（实测 `01a1a770-b339-7b06-80ab-574f992a9397`），
+我们此前生成的是 v4，版本位是 4 —— 一个一眼可辨的形态差异。改成复用消息 ID 的 v7 生成再插连字符；
+身份自检里钉住「版本位必须是 7」。
+
+**2. `x-codebuddy-request` 不再重复发送**
+
+`CommonHeaders` 用 `Header.Set` 写驼峰键（Go 会规范化成 `X-Codebuddy-Request`），`ChatHeaders`
+又用精确键写了一次小写，两个键在 header map 里并存，实际**发出去两个同名头**。官方只发一个
+小写形态的头。统一成小写单次发送。
+
+**3. 补上 `compress`（LZW）响应解压**
+
+上一版把 `Accept-Encoding` 对齐成官方四段后，声明了 `compress` 却没有对应解压分支 —— 真返回时
+会拿到压缩字节、上层解析失败。补 `compress/lzw`，至此声明的五种编码（gzip / compress / deflate /
+br / identity）全部可解。
 
 ### v1.16.13 · 2026-11-04
 
@@ -829,7 +852,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.13` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.14` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -841,11 +864,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.13-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.13-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.13-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.13-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.13-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.14-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.14-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.14-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.14-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.14-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

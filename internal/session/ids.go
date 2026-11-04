@@ -96,15 +96,19 @@ func NewMessageID() string {
 }
 
 // NewConversationID 生成网关自发起会话的 UUID v4 标识（36 字符带横线）。
-// 真实用户会话仍优先透传客户端声明的 conversationId；本函数只用于自动化任务上报。
+// 真实用户会话仍优先透传客户端声明的 conversationId；本函数只用于自动化任务上报
+// 与「客户端没带会话 id」时的兜底。
+//
+// 形态必须是 **UUIDv7 带连字符**：抓官方内置 CLI 的两条对话请求实测（2026-11-05，
+// BASE_URL 指本地 mock），X-Conversation-ID 是 `01a1a770-b339-7b06-80ab-574f992a9397`
+// —— 时间戳打头、版本位 7、variant 8。此前这里生成 v4（`u[6] = 0x40`），版本位是 4，
+// 与官方对不上；v7 的时间靠前也解释得通（会话先建、消息后发，id 单调递增）。
 func NewConversationID() string {
-	var u [16]byte
-	if _, err := cryptorand.Read(u[:]); err != nil {
-		return NewMessageID()
+	h := NewMessageID() // 32 hex，已打 v7 版本位与伪时间戳
+	if len(h) != 32 {
+		return h
 	}
-	u[6] = (u[6] & 0x0f) | 0x40
-	u[8] = (u[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法

@@ -92,8 +92,12 @@ func TestChatIdentitySelfConsistent(t *testing.T) {
 			t.Errorf("%s=%q 第 13 位应为 7（UUIDv7 版本位），实际 %q", kv[0], kv[1], kv[1][12])
 		}
 	}
+	// 会话级 ID 的版本位也必须是 7：抓官方内置 CLI 实测是
+	// `01a1a770-b339-7b06-80ab-574f992a9397`（v7，时间戳打头）。此前这里是 v4。
 	if conv := hdrExact(req.Header, "X-Conversation-ID"); !reUUIDWithHyphen.MatchString(conv) {
 		t.Errorf("X-Conversation-ID=%q 应为带连字符的 UUID 形态", conv)
+	} else if conv[14] != '7' {
+		t.Errorf("X-Conversation-ID=%q 版本位应为 7（UUIDv7，与官方一致），实际 %q", conv, conv[14])
 	}
 
 	// ⑤ baggage 与 X-Conversation-ID 同源：官方把会话 id 与轮级 id 作为 W3C
