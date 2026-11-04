@@ -37,12 +37,68 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.12-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.13-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.13 · 2026-11-04
+
+本版做三件事：把出站身份里几处与官方桌面端不一致的地方对齐，修正限流码的分类口径，
+并给容量排队加观测。brotli 由间接依赖转为直接依赖（纯 Go，无 cgo）；无配置变更，
+替换二进制即可。
+
+**1. 模型级限流码扩到 6001-6008（行为变更）**
+
+官方客户端把 6001-6008 全部按「按模型限额」处理（TPS / TPM / TPH / TPD / RPS / RPM /
+RPH / RPD）。此前只认出 6004 与带「切换其他模型」提示的 6000，其余码会落到 HTTP 429 的
+账号级兜底，把一个「换个模型就能用」的信号罚成整个账号冷却。现在这些码只冻对应模型，
+该账号的其它模型照常可用。
+
+冷却原因同时改为写实际命中的码：它是面板展示文案与「是否按日配额处理」的共同依据，
+若继续恒写 6004，6001（每秒 token）这类秒级窗口会被当成日配额锁到次日。
+
+**2. 出站 Accept-Encoding 对齐官方（行为变更）**
+
+官方 axios 的 http 适配器发 `gzip, compress, deflate`，运行时支持 br 时补 `, br`。
+此前只有 Go 默认的 gzip。这一层每个请求都带、且与官方不同，比 TCP TTL 之类更容易被
+一条规则捞出来。
+
+设了这个头之后标准库不再自动解压，因此同时补了响应解压层：gzip / br / zlib deflate /
+裸 deflate（按首两字节分辨），未知编码原样放行。解压不缓冲，SSE 仍逐帧透传（有测试
+钉住首帧立即到达）。副产品是响应体积更小（br 优于 gzip），下行流量会略降。
+
+**3. 积分、企业用量、签到改走官方那套窄头**
+
+这三类请求在官方客户端里不走请求框架，走后台服务自己的 axios 实例：头只有
+Accept / Authorization / Content-Type / X-User-Id / 企业身份两头 / X-Domain，UA 由
+axios 补 `axios/1.16.1`。此前它们与上报、任务、旅行共用完整桌面头族和一个单段
+`WorkBuddy/<ver>` —— 那不是官方任何请求的形态。
+
+**4. 一处形态修正、两处补齐、一处删除**
+
+- `X-Conversation-ID` 的兜底值改为带连字符的 UUID：官方这里是会话 id（UUID 形态），
+  只有轮级与消息级 ID 才是 32 位 hex。此前客户端没带会话 id 时会发一个官方不出现的形态。
+- 专家任务路径补 `X-Conversation-Request-ID` 与 `X-Root-Request-ID`：上游按会话头族是否
+  齐全做渠道校验，缺任一即 400 / 11128。
+- 专家会话按专家是否云端或付费声明 `X-Moderation-Type: ["protected"]`。
+- 删掉 `X-Machine-ID`：官方客户端的头常量表里没有这个头，是网关自己加的，而且所有出站
+  请求都带。设备级标识保留在上报事件的 `machineId`（官方真实字段）。
+
+**5. 请求日志新增两个观测字段**
+
+业务码为 6020 / 6021 时记录 `queue_position` 与 `queue_retry_after_sec`，用于判断容量
+排队是否值得在网关内等待（官方客户端会查 `/v2/chat/queue/status` 到号重发）。本版只观测，
+不改变排队行为。
+
+**6. 内部：出站身份自洽自检**
+
+新增一组本地断言，钉住版本号三处一致、会话头族齐全、ID 之间的关系与形态、baggage 与
+链路头同源、设备字段同源、`machineId` 按账号隔离。这些参数此前靠人工维持自洽，一次补头
+或扩族就可能写出「只有上游看得见」的矛盾 —— 上面第 4 条的第一项，就是这组断言第一次
+跑时抓出来的。
 
 ### v1.16.12 · 2026-11-04
 
@@ -773,7 +829,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.12` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.13` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -785,11 +841,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.12-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.12-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.12-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.12-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.12-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.13-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.13-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.13-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.13-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.13-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
