@@ -218,7 +218,24 @@ func (t *uidTransport) evictOneLocked() {
 
 // RoundTrip 按请求所属账号选择连接池。
 func (t *uidTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return t.forUID(requestAccountUID(req)).RoundTrip(req)
+	// Accept-Encoding 统一在这里注入：所有出站上游请求（对话、签到、任务、上报、
+	// 模型目录、搜索）都过本层，一处设定即全覆盖，不存在漏网的请求形态。
+	// 调用方显式设过值时不覆盖（目前没有这样的调用方，留作扩展口）。
+	// 设了这个头之后标准库不再自动解压，所以下面必须自己解（见 encoding.go）。
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", acceptEncodingAxios)
+	}
+	resp, err := t.forUID(requestAccountUID(req)).RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	body, derr := decodeResponseBody(resp)
+	if derr != nil {
+		resp.Body.Close()
+		return nil, derr
+	}
+	resp.Body = body
+	return resp, nil
 }
 
 // CloseIdleConnections 关闭所有桶的空闲连接（失败清池路径使用）。

@@ -503,6 +503,18 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	setExact(h, "X-Conversation-ID", conversationID)
+	// 轮级聚合主键：X-Conversation-Request-ID 与 X-Root-Request-ID **同值**，一次
+	// user send 开始时生成、该轮所有请求（含重试/换号）复用；主对话即根请求，所以
+	// Root 与它同值（辅助请求不带 Root，本路径是主对话形态）。
+	//
+	// 本路径此前只设了 Conversation-ID / Message-ID / Request-ID 三个头，缺这两个。
+	// 上游按「会话头族是否齐全」做渠道校验，缺任一头即 400 / code 11128
+	// "conversation id missing"（displayTips「这次调用没通过渠道校验，可能不是官方
+	// 客户端发出的」）。主 chat 路径由 injectConversationHeaders 补齐，这条手搓头的
+	// 专家任务路径漏了（xiaomujin 分支的同类修复，见其 desktop.go 的注释）。
+	turnID := session.NewMessageID()
+	setExact(h, "X-Conversation-Request-ID", turnID)
+	setExact(h, "X-Root-Request-ID", turnID)
 	// 消息级 ID：X-Request-ID 与 X-Conversation-Message-ID **同值**、32 位小写 hex
 	// （CLI 内核 randomUUID().replace(/-/g,"") 后两个头吃同一个值）。
 	msgID := session.NewMessageID()

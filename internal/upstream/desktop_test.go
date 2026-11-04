@@ -160,6 +160,7 @@ func isLowerHexN(s string, n int) bool {
 // 顺带钉住这条路径本来就带的 X-Agent-Intent/X-Agent-Type（主 chat 路径还缺）。
 func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 	var gotID, gotIntent, gotType string
+	var gotConvID, gotConvReqID, gotRootID, gotMsgID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/chat/completions" {
 			t.Errorf("path=%s want /v2/chat/completions", r.URL.Path)
@@ -167,6 +168,10 @@ func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 		gotID = hdrExact(r.Header, "X-Request-ID")
 		gotIntent = r.Header.Get("X-Agent-Intent")
 		gotType = r.Header.Get("X-Agent-Type")
+		gotConvID = hdrExact(r.Header, "X-Conversation-ID")
+		gotConvReqID = hdrExact(r.Header, "X-Conversation-Request-ID")
+		gotRootID = hdrExact(r.Header, "X-Root-Request-ID")
+		gotMsgID = hdrExact(r.Header, "X-Conversation-Message-ID")
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"id\":\"cmb-0123456789abcdef0123456789abcdef\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"2\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
@@ -189,6 +194,24 @@ func TestDesktopChatWithExpertRequestIDShape(t *testing.T) {
 	}
 	if gotType != "main" {
 		t.Errorf("X-Agent-Type=%q want main", gotType)
+	}
+	// 会话头族必须齐全：上游按「三件套/四件套是否齐」做渠道校验，缺任一即
+	// 400 / 11128 "conversation id missing"。这条手搓头的路径此前缺
+	// X-Conversation-Request-ID 与 X-Root-Request-ID 两个。
+	if gotConvID == "" {
+		t.Error("缺 X-Conversation-ID")
+	}
+	if !isLowerHexN(gotConvReqID, 32) {
+		t.Errorf("X-Conversation-Request-ID=%q 不是 32 位小写 hex", gotConvReqID)
+	}
+	if gotRootID != gotConvReqID {
+		t.Errorf("X-Root-Request-ID=%q 应与 X-Conversation-Request-ID=%q 同值（主对话即根请求）", gotRootID, gotConvReqID)
+	}
+	if gotMsgID != gotID {
+		t.Errorf("X-Conversation-Message-ID=%q 应与 X-Request-ID=%q 同值（CLI 内核两个头吃同一个值）", gotMsgID, gotID)
+	}
+	if gotConvReqID == gotMsgID {
+		t.Error("轮级 ID 与消息级 ID 撞成同一个值：官方是两次独立生成（轮级早于消息级）")
 	}
 }
 

@@ -41,13 +41,42 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	return c.doJSON(req)
 }
 
+// authServiceJSON 发 AuthService 那组请求（/billing/meter 族：积分查询、企业用量、
+// 签到）并解信封。
+//
+// 与 billingJSON 的区别只在请求头：这条路径在官方客户端里不走请求框架，走的是
+// 后台服务 AuthService 自己的 axios 实例，头瘦得多、UA 是 `axios/1.16.1`
+// （见 authServiceHeaders 的依据）。此前与 report/tasks/travel 共用 BillingHeaders，
+// 于是积分与签到也顶着完整桌面头族和一个官方不会出现的 UA。
+func (c *Client) authServiceJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	var rdr io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rdr = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, c.billingBase(a)+path, rdr)
+	if err != nil {
+		return nil, err
+	}
+	c.authServiceHeaders(req, a)
+	// 官方这两个请求各自另带一个头：积分查询带 Accept-Language、签到带
+	// X-Device-Token（由调用方加的）。这里一并挂上——多带一个官方也确实会带的头，
+	// 风险远小于缺一个。
+	req.Header.Set("Accept-Language", acceptLanguageFor(a))
+	c.injectDeviceToken(req, a)
+	return c.doJSON(req)
+}
+
 // billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
 // 按 realm 走双路径 fallback：global 先无 /v2 前缀，ErrNotFound 时二次换有 /v2 前缀
 // （上游新旧路径分叉）；cn 单路径（有 /v2）现状不变。仅 global realm 才有多路径。
 func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
 	var lastErr error
 	for i, path := range paths {
-		data, err := c.billingJSON(a, method, path, body)
+		data, err := c.authServiceJSON(a, method, path, body)
 		if err == nil {
 			return data, nil
 		}

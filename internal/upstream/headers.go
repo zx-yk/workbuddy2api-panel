@@ -399,11 +399,16 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	messageID := session.NewMessageID()
 	// 会话头三元组必须齐全：国际端点收紧通道校验后，缺 X-Conversation-ID 的
 	// 请求会直接 400 / 11128（conversation id missing）。入站没带会话 ID 时
-	// 本级补一个 32 hex（与 X-Conversation-Request-ID 的零值兜底同口径），
-	// 不再因为「透传优先」而漏发该头（issue #190）。
+	// 本级补一个，不再因为「透传优先」而漏发该头（issue #190）。
+	//
+	// 补的形态必须是**带连字符的 UUID**，不是 32 hex：X-Conversation-ID 在官方
+	// 客户端里是 `session.id`（UUID 形态，抓包 01a18013-46ce-7483-bddd-2e90d2c24a59），
+	// 只有轮级/消息级 ID 才是 32 hex。此前这里补的是 NewMessageID()（32 hex），
+	// 于是「客户端没给会话 ID」的请求会发一个官方从不出现的形态——身份自检
+	// （identity_consistency_test.go）第一次跑就抓到了它。
 	conversationID := meta.ConversationID
 	if conversationID == "" {
-		conversationID = session.NewMessageID()
+		conversationID = session.NewConversationID()
 	}
 	convHeaderID := conversationHeaderID(conversationID)
 	setExact(req.Header, "X-Conversation-ID", convHeaderID)
@@ -532,6 +537,54 @@ func ExtractClientIP(r *http.Request) string {
 		return real
 	}
 	return ""
+}
+
+// authServiceUA 桌面端后台进程打包的 axios（1.16.1）在不设 UA 时自带的字符串。
+//
+// 积分查询（/billing/meter/get-user-resource*）、企业用量、签到状态与签到这几条
+// 请求在官方客户端里**不走请求框架**，走的是后台服务 AuthService 自己的 axios
+// 实例（authority-snapshot.js 的 `get http`：axios.create，keepAlive、proxy:false）。
+// 依据：2026-10-31 读 5.8.3 / 5.9.4 安装包核对（类里搜 buildHeadersWithTuringToken、
+// `get http`、buildHeaders）；同类项目真机抓包里这几个请求的 UA 也是这个值。
+//
+// 此前网关给这些请求发的是单段 `WorkBuddy/<ver>`——那是 banner 接口的显式覆写
+// 形态，不是积分/签到的形态。发一个「官方在任何积分请求上都不会出现的 UA」，
+// 比「不一致」更糟：它本身就是一个可检索的特征。
+const authServiceUA = "axios/1.16.1"
+
+// authServiceHeaders AuthService 那组请求（积分、企业用量、签到）的请求头。
+//
+// 官方这组头很瘦：Accept、Content-Type、Authorization、X-User-Id、企业号的
+// X-Enterprise-Id / X-Tenant-Id、X-Domain、拦截器补的 X-Request-ID，加 axios 自带
+// 的 UA 与 Accept-Encoding。**没有**请求框架的 X-CodeBuddy-Request / X-Product /
+// X-Requested-With / 完整桌面头族。
+// 积分查询另带 Accept-Language、签到另带 X-Device-Token（由调用方按需加）。
+func (c *Client) authServiceHeaders(req *http.Request, a *auth.Auth) {
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	// 拦截器补的 X-Request-ID：每次请求新生成（官方是 crypto.randomUUID 去连字符）。
+	req.Header.Set("X-Request-ID", session.NewMessageID())
+	switch {
+	case c != nil && c.UserAgent != "":
+		// 配置显式覆盖优先（自定义品牌/版本场景）。
+		req.Header.Set("User-Agent", c.UserAgent)
+	case c == nil || c.attributionClientName() != "SaaS":
+		req.Header.Set("User-Agent", authServiceUA)
+	}
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
+	}
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	if a.EnterpriseID != "" {
+		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
+	}
+	if d := a.DomainValue(); d != "" {
+		req.Header.Set("X-Domain", d)
+	}
+	attachAccountUID(req, a)
 }
 
 // BillingHeaders billing 接口请求头。

@@ -24,8 +24,12 @@ func hdrExact(h http.Header, key string) string {
 
 // TestChatHeadersAlwaysSendConversationTrio 回归 issue #190：国际端点收紧通道
 // 校验后，缺 X-Conversation-ID 的聊天请求会 400 / 11128（conversation id
-// missing）。即使调用方没给会话 ID（零值 ChatMeta），三元组也必须齐全，
-// 且兜底 ID 是 32 位 hex。
+// missing）。即使调用方没给会话 ID（零值 ChatMeta），三元组也必须齐全。
+//
+// 形态按官方分两种（2026-11-04 从本机 5.9.3 安装包 app.asar 复核 + 抓包形态）：
+//   - X-Conversation-ID = 会话 id，**带连字符的 UUID**（官方 `session.id`）；
+//   - X-Conversation-Request-ID / -Message-ID / X-Request-ID = 32 位小写 hex。
+// 此前这里把兜底会话 id 也生成为 32 hex，是官方从不出现的形态。
 func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 	c := &Client{}
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
@@ -35,12 +39,12 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 	c.ChatHeaders(req, testAuth(), "", ChatMeta{})
 
 	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
-	// 会话 id、轮级请求 id、消息级 id 全是 32 位小写 hex。消息级两个头
-	// （X-Conversation-Message-ID 与 X-Request-ID）**同值**——CLI 内核里是
-	// `q = randomUUID().replace(/-/g,"")`，两个头都吃同一个 q。
-	// v1.16.0 曾按 app.asar 的 applyGatewayHeaders 改成两个独立 UUID v4，那是错层
-	// （那是 UI→CLI 的 ACP 元数据层，chat 由 CLI 内核发出）。
-	for _, h := range []string{"X-Conversation-ID", "X-Conversation-Request-ID"} {
+	uuidHyphen := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if v := hdrExact(req.Header, "X-Conversation-ID"); !uuidHyphen.MatchString(v) {
+		t.Errorf("X-Conversation-ID = %q, want 带连字符的 UUID（官方 session.id 形态）", v)
+	}
+	// 轮级请求 id 与消息级 id 是 32 位小写 hex。
+	for _, h := range []string{"X-Conversation-Request-ID"} {
 		v := hdrExact(req.Header, h)
 		if v == "" {
 			t.Fatalf("%s missing (通道校验会拒绝缺少会话三元组的请求)", h)
