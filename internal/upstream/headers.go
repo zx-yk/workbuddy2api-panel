@@ -150,13 +150,18 @@ func deriveAccountStableID(uid, purpose string) string {
 	return hex.EncodeToString(sum[:18]) // 36 hex chars
 }
 
-// injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
-// 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
+// injectAccountStableHeaders 在 req 注入 X-Session-ID：按 uid 稳定派生，跨重启
+// 固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
+//
+// 只发 X-Session-ID，不发 X-Machine-ID：内置 CLI 的 header 常量表里有
+// `SESSION_ID_HEADER = "X-Session-ID"`，而 `X-Machine-ID` 在整个
+// codebuddy-lite-wb.mjs 与主进程包里都是 0 次——它不是官方头，发出去就是一条
+// 只有网关才有的特征。设备级的稳定标识走上报事件的 machineId（见 desktop.go），
+// 那是官方真有的字段。
 func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
 	if a == nil || a.UID == "" {
 		return
 	}
-	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
 	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
 }
 
