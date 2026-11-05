@@ -225,8 +225,11 @@ func TestDesktopHardwarePerAccount(t *testing.T) {
 	if c1 != c2 || m1 != m2 || o1 != o2 || cm1 != cm2 {
 		t.Errorf("同账号应稳定：%d/%d/%s/%s vs %d/%d/%s/%s", c1, m1, o1, cm1, c2, m2, o2, cm2)
 	}
-	if !strings.Contains(cm1, "Core(TM)") {
-		t.Errorf("cpuModel=%q 不像真实 CPU 型号串", cm1)
+	// cpuModel 必须是真实 CPU 的型号串。此前这里断言「含 Core(TM)」，
+	// 那是硬编码 9 条 Intel 时的假设；现在配置表取自真实 dxdiag 报告，
+	// 还包含 AMD Ryzen、Intel Xeon、Celeron 等，断言改成「属于已知厂商」。
+	if !strings.Contains(cm1, "Intel(R)") && !strings.HasPrefix(cm1, "AMD ") {
+		t.Errorf("cpuModel=%q 不像真实 CPU 型号串（应为 Intel(R)… 或 AMD …）", cm1)
 	}
 
 	seen := map[string]bool{}

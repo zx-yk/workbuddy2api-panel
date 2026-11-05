@@ -88,24 +88,85 @@ type DesktopEvent map[string]any
 // 改为按 uid 从真实常见配置里确定性挑选：账号间互异、单账号跨重启稳定，
 // 且组合都是市面上真实存在的机型（核数:内存GB:Windows build）。
 func desktopHardware(a *auth.Auth) (cpuCores, memoryGB int, osVersion, cpuModel string) {
-	// cpuModel 与核数取自同一条目，保证指纹自洽（不会报出「4 核的 i9」这种组合）。
+	// 按 uid 稳定派生一台「真实存在过」的 Windows 机器参数。
+	//
+	// 表里全是**真实机器的真实组合**，取自公开的 dxdiag 报告（游戏/模拟器/切片器的
+	// issue 模板强制要求贴，量大且格式统一；采集脚本与原始数据见
+	// tools/hw-samples/）。共 57 条，覆盖 4–32 逻辑核、8–128GB、Windows 10 1809 到 11 24H2。
+	//
+	// 为什么不自己拼组合：cpuModel、核数、内存、build 四者必须同源。此前硬编码 9 条
+	// 是"看起来合理"的组合，现在是"确实有人这么配"的组合——后者经得起交叉核对
+	// （i7-10700 在 dxdiag 里就是 16 个逻辑处理器，写成 8 核反而露馅）。
+	//
+	// 已排除四类：服务器/双路工作站（ProLiant、Z10PE）、ARM64 机型（Snapdragon X，
+	// 与上报恒定的 arch=x64 矛盾）、以及 2 核/4G 这类跑不动 AI 客户端的低配机。
 	table := []struct {
 		cpu, mem int
 		build    string
 		model    string
 	}{
-		{8, 16, "10.0.22631", "Intel(R) Core(TM) i7-10700"},
-		{12, 32, "10.0.22631", "Intel(R) Core(TM) i7-12700"},
-		{16, 32, "10.0.22621", "Intel(R) Core(TM) i7-13700"},
-		{20, 32, "10.0.26100", "Intel(R) Core(TM) i7-14700"},
-		{24, 64, "10.0.26100", "Intel(R) Core(TM) i9-14900"},
-		{6, 8, "10.0.22000", "Intel(R) Core(TM) i5-10400"},
-		{10, 16, "10.0.19045", "Intel(R) Core(TM) i5-13400"},
-		{14, 24, "10.0.22621", "Intel(R) Core(TM) i5-13600KF"},
-		{4, 8, "10.0.19045", "Intel(R) Core(TM) i5-8250U"},
+		{4, 8, "10.0.18363", "Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz"},
+		{4, 8, "10.0.19042", "AMD Ryzen 3 2200U with Radeon Vega Mobile Gfx"},
+		{4, 8, "10.0.19045", "Intel(R) Xeon(R) CPU E3-1225 v3 @ 3.20GHz"},
+		{4, 16, "10.0.26100", "Intel(R) Core(TM) i3-9100T CPU @ 3.10GHz"},
+		{4, 16, "10.0.26100", "AMD Ryzen 3 PRO 3200GE w/ Radeon Vega Graphics"},
+		{4, 24, "10.0.19045", "Intel(R) Core(TM) i5-4460 CPU @ 3.20GHz"},
+		{4, 32, "10.0.19044", "Intel(R) Core(TM) i5-6400 CPU @ 2.70GHz"},
+		{6, 32, "10.0.22621", "Intel(R) Core(TM) i5-9400F CPU @ 2.90GHz"},
+		{8, 8, "10.0.18362", "Intel(R) Core(TM) i7-7700 CPU @ 3.60GHz"},
+		{8, 16, "10.0.19044", "11th Gen Intel(R) Core(TM) i7-11370H @ 3.30GHz"},
+		{8, 16, "10.0.19045", "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz"},
+		{8, 16, "10.0.22621", "Intel(R) Core(TM) i7-8565U CPU @ 1.80GHz"},
+		{8, 32, "10.0.17763", "Intel(R) Core(TM) i7-6820HQ CPU @ 2.70GHz"},
+		{8, 32, "10.0.19042", "AMD Ryzen 5 3400G with Radeon Vega Graphics"},
+		{8, 48, "10.0.18362", "Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz"},
+		{12, 16, "10.0.18363", "Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz"},
+		{12, 16, "10.0.19041", "AMD Ryzen 5 2600X Six-Core Processor"},
+		{12, 16, "10.0.19045", "AMD Ryzen 5 5600X 6-Core Processor"},
+		{12, 16, "10.0.22621", "AMD Ryzen 5 5600 6-Core Processor"},
+		{12, 16, "10.0.22621", "12th Gen Intel(R) Core(TM) i5-12400F"},
+		{12, 16, "10.0.22631", "AMD Ryzen 5 5500U with Radeon Graphics"},
+		{12, 16, "10.0.26100", "AMD Ryzen 5 2600 Six-Core Processor"},
+		{12, 16, "10.0.26120", "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz"},
+		{12, 32, "10.0.19041", "AMD Ryzen 5 3600X 6-Core Processor"},
+		{12, 32, "10.0.19042", "Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz"},
+		{12, 32, "10.0.22621", "AMD Ryzen 5 7600 6-Core Processor"},
+		{12, 64, "10.0.17763", "Intel(R) Xeon(R) E-2176M CPU @ 2.70GHz"},
+		{12, 64, "10.0.22631", "Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz"},
+		{16, 16, "10.0.19041", "AMD Ryzen 7 2700X Eight-Core Processor"},
+		{16, 16, "10.0.19044", "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"},
+		{16, 16, "10.0.22000", "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"},
+		{16, 16, "10.0.22631", "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"},
+		{16, 16, "10.0.26100", "Intel(R) Core(TM) i5-14400F"},
+		{16, 32, "10.0.19042", "Intel(R) Xeon(R) W-2140B CPU @ 3.20GHz"},
+		{16, 32, "10.0.19045", "Intel(R) Core(TM) i7-10700KF CPU @ 3.80GHz"},
+		{16, 32, "10.0.22000", "Intel(R) Core(TM) i7-10700 CPU @ 2.90GHz"},
+		{16, 32, "10.0.22631", "AMD Ryzen 7 2700X Eight-Core Processor"},
+		{16, 32, "10.0.26100", "AMD Ryzen 7 9700X 8-Core Processor"},
+		{16, 56, "10.0.26100", "Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz"},
+		{16, 64, "10.0.19045", "AMD Ryzen 9 5900HX with Radeon Graphics"},
+		{16, 64, "10.0.19045", "AMD Ryzen 7 5800X3D 8-Core Processor"},
+		{16, 64, "10.0.22631", "AMD Ryzen 7 7800X3D 8-Core Processor"},
+		{20, 16, "10.0.19044", "Intel(R) Xeon(R) CPU E5-2666 v3 @ 2.90GHz"},
+		{20, 16, "10.0.22621", "12th Gen Intel(R) Core(TM) i7-12700H"},
+		{20, 16, "10.0.22631", "13th Gen Intel(R) Core(TM) i7-13700H"},
+		{20, 32, "10.0.19042", "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz"},
+		{20, 64, "10.0.26100", "Intel(R) Core(TM) i9-10900KF CPU @ 3.70GHz"},
+		{22, 16, "10.0.26100", "Intel(R) Core(TM) Ultra 7 155H"},
+		{24, 32, "10.0.26100", "AMD Ryzen 9 5900X 12-Core Processor"},
+		{24, 32, "10.0.26100", "13th Gen Intel(R) Core(TM) i7-13700K"},
+		{24, 32, "10.0.26200", "AMD Ryzen 9 5900X 12-Core Processor"},
+		{32, 32, "10.0.26100", "AMD Ryzen 9 9950X3D 16-Core Processor"},
+		{32, 32, "10.0.26100", "AMD Ryzen 9 7945HX with Radeon Graphics"},
+		{32, 32, "10.0.26100", "13th Gen Intel(R) Core(TM) i9-13900K"},
+		{32, 64, "10.0.19045", "AMD Ryzen 9 3950X 16-Core Processor"},
+		{32, 64, "10.0.22631", "AMD Ryzen 9 7950X 16-Core Processor"},
+		{32, 64, "10.0.22631", "13th Gen Intel(R) Core(TM) i9-13900K"},
 	}
+	// 取两个字节做下标：单字节只有 256 种可能，条数一多尾部会明显偏少。
 	sum := sha256.Sum256([]byte("wb2a:hw:" + a.UID))
-	c := table[int(sum[0])%len(table)]
+	i := int(sum[0])<<8 | int(sum[1])
+	c := table[i%len(table)]
 	return c.cpu, c.mem, c.build, c.model
 }
 
