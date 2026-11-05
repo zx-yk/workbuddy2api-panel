@@ -187,3 +187,67 @@ func BusinessCode(body []byte) int {
 }
 
 var businessCodeRe = regexp.MustCompile(`"code"\s*:\s*"?([0-9]{3,6})"?`)
+
+// 官方 classifyErrorDetail（内置 CLI codebuddy-lite-wb.mjs）的确定性码表。
+//
+// 为什么需要这张表：上游把「额度耗尽」「授权过期」「未激活」全都套在 **429** 上返回，
+// 而 429 只说明"这次没成"，不说明原因。只看状态码会把三者一律当成可自愈的软限流：
+//
+//   - 额度耗尽 → 冷却 10 分钟回来还是空，白等；
+//   - 授权过期 → 冷却 → 恢复 → 再失败，无限循环，且日志里看不出真正原因。
+//
+// 官方口径是**业务码优先于状态码**：命中即分类，与 HTTP 状态无关。这里照抄语义，
+// 取码口径同 hasBusinessCode（递归 walk JSON，字符串/数字都认）。
+var (
+	// quotaExhaustedCodes 官方 subcategory = quota_balance_exhausted：
+	// 额度真的用完了，等不来（要靠签到/领包补充）→ 硬冷却到次日 04:00。
+	quotaExhaustedCodes = []string{
+		"14001", // UsageLimitExceeded
+		"14002", // UsageLimitExceeded（另一变体，官方同样归 balance_exhausted）
+		"14012", // UsageLimitExceededEnterprise
+		"14013", // UsageLimitExceededTencent
+		"14014", // UsageLimitEnterpriseExhausted
+		"14018", // UsageLimitUserExhausted
+		"14019", // UsageLimitNoTokenBudget
+	}
+	// accountStateCodes 账号状态问题：授权过期 / 未开通，重试等不来自愈。
+	// 只能重新登录或补完开通流程，因此归账号级故障而非限流。
+	accountStateCodes = []string{
+		"14015", // UsageLimitLicenseExpired —— 官方 category=auth / subcategory=auth_expired
+		"14016", // UsageLimitEnterpriseNotActivated —— quota_not_activated
+		"14017", // UsageLimitUserNotActivated —— quota_not_activated
+	}
+)
+
+// officialCodeKind 按官方码表给出确定性分类；不在表内返回 ErrNone，
+// 由调用方继续走既有判定（文案 / 其他业务码 / 状态码兜底）。
+func officialCodeKind(body string) ErrKind {
+	if !strings.Contains(body, `"code"`) {
+		return ErrNone
+	}
+	for _, c := range quotaExhaustedCodes {
+		if hasBusinessCode(body, c) {
+			return ErrHardCredit
+		}
+	}
+	for _, c := range accountStateCodes {
+		if hasBusinessCode(body, c) {
+			return ErrAccountFault
+		}
+	}
+	return ErrNone
+}
+
+// AccountFaultReason 账号级故障在冷却台账里的原因文案，带上**实际**命中的业务码。
+//
+// 此前 handler 恒写 "account fault (14017)"：码表只有 14017 时没毛病，扩到
+// 14015/14016 之后，授权过期会被标成 trial not activated，面板上看不出真因，
+// 排查方向直接跑偏。
+func AccountFaultReason(body string) string {
+	for _, c := range accountStateCodes {
+		if hasBusinessCode(body, c) {
+			return "account fault (" + c + ")"
+		}
+	}
+	return "account fault"
+}

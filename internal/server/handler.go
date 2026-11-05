@@ -1890,7 +1890,11 @@ func (h *Handler) noteRiskSignal(uid string, kind upstream.ErrKind, body, model 
 	case upstream.ErrSessionDead:
 		n.Report("session_dead", "风控信号：登录态失效 12153（账号可能被踢）", detail)
 	case upstream.ErrAccountFault:
-		n.Report("account_fault", "风控信号：11140 渠道校验失败", detail)
+		if upstream.IsAccountRestricted(body) {
+			n.Report("account_fault", "风控信号：11140/11142 账号被上游限制（request illegal）", detail)
+		} else {
+			n.Report("account_fault", "账号级故障："+upstream.AccountFaultReason(body), detail)
+		}
 	}
 }
 
@@ -1954,17 +1958,18 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
 		// 账号级授权/配额故障按业务码分野（口径与 Classify 一致）：
-		//   - 11140 + "request illegal" → 账号被上游限制（异常行为/风控）：硬禁用。
+		//   - 11140 / 11142 + "request illegal" → 账号被上游限制（异常行为/风控）：硬禁用。
 		//     解除只能由用户在 WorkBuddy 官方渠道申诉，重登无效（issue 1849 结论）。
-		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
-		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
+		//   - 14015 授权过期 / 14016 企业未激活 / 14017 试用未激活 → register 或重新登录
+		//     后可能自愈，**保持软冷却**（禁用会让用户补完流程后仍无法用）。
+		//     reason 写实际码，面板能直接看出是哪一个。
 		// 注意 11128 的 msg 同为 "request illegal"，但那是通道校验失败，已在
 		// Classify 分流到 ErrChannelRefused，走不到这里。
 		if upstream.IsAccountRestricted(body) {
-			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 request illegal); appeal in WorkBuddy (submit feedback) to lift the restriction")
+			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140/11142 request illegal); appeal in WorkBuddy (submit feedback) to lift the restriction")
 			return
 		}
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), upstream.AccountFaultReason(body))
 	case upstream.ErrChannelRefused:
 		// 11128 通道校验失败（上游判定请求可能不是官方客户端发出，displayMsg 就是
 		// 「请求被拦截，请重新发送」）。账号本身健康——官方客户端可正常使用同一账号，

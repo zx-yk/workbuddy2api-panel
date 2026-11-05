@@ -181,15 +181,19 @@ var accountFaultMarkers = []string{
 // accountRestrictedMsg 是 WorkBuddy 11140 账号限制的正文关键词。
 const accountRestrictedMsg = "request illegal"
 
-// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制（11140
-// "request illegal"）。必须 code + 文案双条件：
+// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制
+// （11140 / 11142 + "request illegal"）。必须 code + 文案双条件：
 //   - 只看文案："request illegal" 也出现在 11128 通道校验失败里（健康账号）；
 //   - 只看 code：11140 也承载模型级限流文案（应归 ErrSoftRate）。
+//
+// 11142 的依据来自官方 classifyErrorDetail：`[11142,{category:"auth",
+// subcategory:"auth_forbidden"}]`，与 11140 同属 auth_forbidden。放进同一判定
+// 而不是按 code 一刀切，是因为它同样可能承载别的文案（11140 的教训）。
 func IsAccountRestricted(body string) bool {
 	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
 		return false
 	}
-	return hasBusinessCode(body, "11140")
+	return hasBusinessCode(body, "11140") || hasBusinessCode(body, "11142")
 }
 
 // isChannelRefused 报告上游 body 是否为 WorkBuddy 的通道校验失败（11128
@@ -688,6 +692,10 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//
+// 官方码表（officialCodeKind）排在 sessionDead / accountFault 文案判定之后、
+// 模型繁忙之前：它按业务码给确定性分类，优先级必须高于 `status==429` 这类
+// 只看传输状态的兜底。
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
@@ -726,11 +734,15 @@ func Classify(status int, body string) ErrKind {
 			return ErrAccountFault
 		}
 	}
-	// 14018 是明确的账号积分耗尽业务码。它必须先于通用 429 兜底，否则会被误判为
-	// 可自愈的软限流并在全池冷却时反复兜底选中（issue #175）。仅按结构化 code
-	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
-	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
-		return ErrHardCredit
+	// 官方码表的确定性语义：额度耗尽 / 账号状态类业务码，先于通用 429 兜底。
+	//
+	// 429 只是**传输层状态**，同一个 429 背后的业务码可能意味着三件完全不同的事：
+	// 额度用完（弃号等签到恢复）、授权过期（重试永远没用）、或者只是软限流（等几分钟）。
+	// 若不按码分流，全部会落到下面的 `status==429 → ErrSoftRate`：
+	//   - 额度耗尽被白等 10 分钟再失败；
+	//   - 授权过期 → 冷却 → 恢复 → 再失败 → 无限循环，且日志里看不出原因。
+	if kind := officialCodeKind(body); kind != ErrNone {
+		return kind
 	}
 	// 14003 是模型容量繁忙，不是账号级限流：先按结构化业务码分流，避免落入
 	// 通用 429 后给整个账号施加软冷却。6004 的模型限流语义保持不变。
