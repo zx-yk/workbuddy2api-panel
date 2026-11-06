@@ -50,8 +50,8 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
-| **v1.16.19** | 设备标识 UUID 化 + 点亮通道口径对齐（正式发布号） | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
-| **v1.16.18** | 设备标识 UUID 化 + 点亮通道口径对齐（首次发布号） | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
+| **v1.16.19** | v1.16.18 的重新发布（发布号变更，功能相同） | 无代码改动；补全版本号与更新记录 |
+| **v1.16.18** | 设备标识 UUID 化 + 点亮通道口径对齐 | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
 | **v1.16.17** | CLI 链按官方实测字段集对齐 | 新增 `cli_fields.go` 白名单裁剪；补 `chat_tool_action`、`user_task_failed_credit_refund`；抽 `newCLIEvent` |
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
@@ -59,37 +59,15 @@
 
 ### v1.16.19 · 2026-11-07
 
-本版对齐官方实测的设备标识形态，并修正「点亮通道」里抄自官方却写反的三处口径。
+本版是 **v1.16.18 的重新发布**：功能改动与 v1.16.18 完全相同，技术细节不在此重复，
+见下方 v1.16.18 一节。
+
+变更只涉及发布号：
+
+- v1.16.18 首次打 tag 时漏写了版本号与更新记录，本版把这两项一并补全，作为该批改动的正式发布号
+- v1.16.18 的 tag 保留，内容已同步为完整版（含版本说明与对应版本号）
+
 无配置变更，替换二进制即可。
-
-> 发布号说明：1.16.18 首次发布时漏写了版本号与本节，补记时重打了那个 tag；
-> 本版是同一批改动的正式发布号，1.16.18 的记录也保留在上方。
-
-**1. 设备标识改为 UUID v4 形态**
-
-官方客户端的 `machineId` / `sessionId` 都是**带横线的 UUID v4**（8-4-4-4-12、version 位 4、
-variant 位 8-b）；此前我们产出的是 36 位无横线 hex —— 长度相同但字符集形态不同。
-
-**2. `sessionId` 的生命周期纠正为「一次客户端运行」**
-
-官方实测：同一台机器上两次运行的 `sessionId` **不同**，`machineId` 保持不变 ——
-即 `sessionId` 属于「一次客户端运行」、`machineId` 属于「一台设备」。此前两者都按账号固定，
-`sessionId` 的生命周期是错的。现在同进程内所有账号共享一个 `sessionId`（一个客户端进程一个），
-重启后换新的。
-
-**3. 点亮通道（growth 域活跃上报）的三处口径对齐官方**
-
-`agentName` 由 `default` 改为 `cli`、`agentType` 由 `conversation` 改为 `main`、
-`traceId` 由空串改为独立 32 位 hex。凡是**抄自官方**的字段，口径必须与官方一致。
-
-同时在该文件头补写说明：这条通道发到 **billing 域**、目的是**点亮**，字段集是防御性全量；
-它与 `desktop.go` 的「官方 CLI 遥测」（发 www 域、字段按实测白名单严格对齐）**不是一回事**，
-不要用同一把尺子去量。
-
-**4. 测试**
-
-- `TestDeviceIdentifiersAreUUID`：两个标识都是 UUID v4 形态
-- `TestSessionIDLifecycle`：`sessionId` 同进程一致且与账号无关，`machineId` 按账号稳定
 
 ### v1.16.18 · 2026-11-07
 
