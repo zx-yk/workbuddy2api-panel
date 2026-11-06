@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // wantDesktopUA 默认配置下的桌面 UA（版本源统一后由 clientVersion/cliVersion 拼出，
@@ -352,6 +353,89 @@ func TestDesktopChatWithExpertModerationHeader(t *testing.T) {
 		}
 		if got != `["protected"]` {
 			t.Errorf("X-Moderation-Type=%q want [\"protected\"]", got)
+		}
+	}
+}
+
+// TestCLIChainFieldsMatchOfficial 断言 CLI 链事件上报后的字段集与官方实测白名单
+// **完全一致**（不多不少）。UI 侧事件不在白名单里，不受裁剪。
+func TestCLIChainFieldsMatchOfficial(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("body must be array: %v", err)
+		}
+		w.Write([]byte(`{"code":0,"msg":"OK"}`))
+	}))
+	defer srv.Close()
+
+	const (
+		conv = "01a1b18f-e32c-742e-96b6-4c531adf8cec"
+		req  = "01a1b191ff2a7c7b1e5f0c3f2d1e0a1b"
+		msg  = "01a1b19200112233445566778899aabb"
+	)
+	trace := session.NewMessageID()
+	events := append(DesktopChatSequence(conv, req, msg, "auto", "Auto"),
+		DesktopToolActionEvent(conv, req, msg, trace, "call_1", "Bash", "failed", "main",
+			1, 2, false, "99999", "key", "boom", "auto", "Auto"),
+		DesktopTaskFailedCreditRefundEvent(conv, req, msg, "task failed"),
+	)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	if err := c.ReportDesktopEvent(&auth.Auth{AccessToken: "at", UID: "u-dt", Domain: "www.codebuddy.cn"}, events...); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if len(got) != len(events) {
+		t.Fatalf("上报 %d 条，期望 %d", len(got), len(events))
+	}
+	for _, ev := range got {
+		code, _ := ev["eventCode"].(string)
+		allow, ok := cliOfficialFields[code]
+		if !ok {
+			// 不在实测样本里的事件不参与裁剪：UI 侧事件（agent_task_created 等）
+			// 与条件触发事件（chat_request_response 只在失败分支发）都属此类。
+			// 生产代码对它们不做裁剪（白名单未命中即原样发出）。
+			continue
+		}
+		allowed := map[string]bool{}
+		for _, f := range allow {
+			allowed[f] = true
+		}
+		for k := range ev {
+			if !allowed[k] {
+				t.Errorf("%s 多发字段 %q（官方没有）", code, k)
+			}
+		}
+		for _, f := range allow {
+			if _, ok := ev[f]; !ok {
+				t.Errorf("%s 缺字段 %q（官方有）", code, f)
+			}
+		}
+	}
+}
+
+// TestUIEventKeepsBuddyFields UI 侧事件带 buddyId/buddyName（官方 UI 报文里有），
+// 不应被 CLI 白名单误裁。
+func TestUIEventKeepsBuddyFields(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		json.Unmarshal(raw, &got)
+		w.Write([]byte(`{"code":0,"msg":"OK"}`))
+	}))
+	defer srv.Close()
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	if err := c.ReportDesktopEvent(&auth.Auth{AccessToken: "at", UID: "u-dt", Domain: "www.codebuddy.cn"},
+		DesktopEvent{"eventCode": "agent_task_created", "mode": "craft"}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events", len(got))
+	}
+	for _, k := range []string{"buddyId", "buddyName"} {
+		if _, ok := got[0][k]; !ok {
+			t.Errorf("UI 事件不该丢 %s", k)
 		}
 	}
 }

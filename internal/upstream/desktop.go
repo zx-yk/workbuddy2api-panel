@@ -221,6 +221,23 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 		for k, v := range ev {
 			m[k] = v
 		}
+		// CLI 链按官方实测字段集裁剪：官方报文里没有的字段一律不发。
+		// 这一步同时解决两类偏差：公共指纹里的 UI 侧字段（buddyId/buddyName）
+		// 不该出现在 CLI 链；个别事件的基底字段官方没有（如 chat_message_status
+		// 没有 presentAt）。UI 侧事件不在白名单里，不受裁剪影响。
+		if code, ok := ev["eventCode"].(string); ok {
+			if allow, ok := cliOfficialFields[code]; ok {
+				allowed := make(map[string]bool, len(allow))
+				for _, f := range allow {
+					allowed[f] = true
+				}
+				for k := range m {
+					if !allowed[k] {
+						delete(m, k)
+					}
+				}
+			}
+		}
 		arr = append(arr, m)
 	}
 	raw, err := json.Marshal(arr)
@@ -247,6 +264,66 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	return err
 }
 
+// newCLIEvent 构造一条 CLI 链事件的基础字段。
+//
+// 官方实测（2026-11-06 实时抓包，12 批 /v2/report）：一次请求链内 6 个事件的
+// traceId 与 requestId 是**同一个值**，messageId 每轮一个 —— 与桌面 UI 事件的
+// ID 体系不同（UI 侧 agent_task_created 的 messageId 就等于 requestId）。
+//
+// 基底里带 presentAt / parentConversationId / agentName 等字段，但个别事件官方
+// 没有（chat_message_status 无 presentAt；user_task_failed_credit_refund 这几个
+// 一律没有），由 ReportDesktopEvent 按 cliOfficialFields 白名单裁掉。
+func newCLIEvent(code, conversationID, requestID, traceID string) DesktopEvent {
+	return DesktopEvent{
+		"eventCode":                         code,
+		"conversationId":                    conversationID,
+		"requestId":                         requestID,
+		"traceId":                           traceID,
+		"rootRequestId":                     requestID,
+		"parentConversationId":              conversationID,
+		"agentName":                         "cli",
+		"agentType":                         "main",
+		"codebuddy.session_id":              conversationID,
+		"codebuddy.conversation_request_id": requestID,
+		"presentAt":                         time.Now().UnixMilli(),
+	}
+}
+
+// DesktopToolActionEvent 构造「工具调用」事件（官方实测 47 字段）。
+//
+// 关键：工具调用**失败也要报**，并带错误码（toolErrorCode / toolErrorCodeKey /
+// toolErrorMessage）。官方样例：toolName:"Bash" type:"main" toolStatus:"failed"
+// toolCallSuccessful:false toolErrorCode:"99999"。
+func DesktopToolActionEvent(conversationID, requestID, messageID, traceID string,
+	toolCallID, toolName, toolStatus, toolType string,
+	stepCount, totalStepCount int, successful bool,
+	errorCode, errorKey, errorMsg, modelID, modelName string) DesktopEvent {
+	ev := newCLIEvent("chat_tool_action", conversationID, requestID, traceID)
+	ev["messageId"] = messageID
+	ev["toolCallId"] = toolCallID
+	ev["toolName"] = toolName
+	ev["toolStatus"] = toolStatus
+	ev["toolCallSuccessful"] = successful
+	ev["toolErrorCode"] = errorCode
+	ev["toolErrorCodeKey"] = errorKey
+	ev["toolErrorMessage"] = errorMsg
+	ev["type"] = toolType
+	ev["stepCount"] = stepCount
+	ev["totalStepCount"] = totalStepCount
+	ev["requestModelId"] = modelID
+	ev["requestModelName"] = modelName
+	return ev
+}
+
+// DesktopTaskFailedCreditRefundEvent 构造「任务失败积分退款」事件（官方实测 30 字段，
+// 特有字段只有 reason）。失败路径上官方照报不误 —— 一次失败请求里它出现了 8 次。
+func DesktopTaskFailedCreditRefundEvent(conversationID, requestID, messageID, reason string) DesktopEvent {
+	ev := newCLIEvent("user_task_failed_credit_refund", conversationID, requestID, session.NewMessageID())
+	ev["messageId"] = messageID
+	ev["reason"] = reason
+	return ev
+}
+
 // DesktopChatSequence 构造一次「桌面端成功对话」的完整事件链
 // （agent_task_created → chat_message_send → chat_request_send →
 // chat_message_response → chat_message_status → chat_request_response）。
@@ -271,19 +348,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 	now := time.Now().UnixMilli()
 
 	mkCLI := func(code string, extra map[string]any) DesktopEvent {
-		ev := DesktopEvent{
-			"eventCode":                         code,
-			"conversationId":                    conversationID,
-			"requestId":                         requestID,
-			"traceId":                           traceID,
-			"rootRequestId":                     requestID,
-			"parentConversationId":              conversationID,
-			"agentName":                         "cli",
-			"agentType":                         "main",
-			"codebuddy.session_id":              conversationID,
-			"codebuddy.conversation_request_id": requestID,
-			"presentAt":                         now,
-		}
+		ev := newCLIEvent(code, conversationID, requestID, traceID)
 		for k, v := range extra {
 			ev[k] = v
 		}

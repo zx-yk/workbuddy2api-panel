@@ -37,12 +37,42 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.16-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.17-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.17 · 2026-11-07
+
+本版按官方内置 CLI 的**实时**上报报文（本地 mock 抓取，12 批 /v2/report）修正 CLI 链事件形态。
+无配置变更，替换二进制即可。
+
+**1. CLI 链事件按官方实测字段集裁剪**
+
+新增 `internal/upstream/cli_fields.go`：官方 CLI 六个事件码的实测字段集。上报时按它裁剪，
+官方报文里没有的字段一律不发。
+
+此前 CLI 链与桌面 UI 链共用同一套公共指纹，于是产生两类偏差：UI 侧字段混进了 CLI 链；
+个别事件的基底字段官方并没有（如 `chat_message_status` 没有 `presentAt`）。用白名单而不是
+逐条打补丁，是为了不给「把 UI 侧字段塞进 CLI 链」留下再次发生的机会。
+
+**2. 补两个此前完全缺失的事件**
+
+- `chat_tool_action`（工具调用，47 字段）：工具调用**失败也要报**，并带错误码
+  （`toolErrorCode` / `toolErrorCodeKey` / `toolErrorMessage`）
+- `user_task_failed_credit_refund`（任务失败积分退款，30 字段）：失败路径上官方照报不误
+
+**3. CLI 链的事件基底抽成 `newCLIEvent`**
+
+官方实测：一次请求链内六个事件的 `traceId` 与 `requestId` 是**同一个值**，`messageId` 每轮一个。
+这与桌面 UI 事件的 ID 体系不同（UI 侧 `agent_task_created` 的 `messageId` 等于 `requestId`）。
+
+**4. 测试**
+
+- `TestCLIChainFieldsMatchOfficial`：钉住「上报字段集与官方实测白名单完全一致（不多不少）」
+- `TestUIEventKeepsBuddyFields`：保证 UI 侧事件不被白名单误裁
 
 ### v1.16.16 · 2026-11-06
 
@@ -954,7 +984,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.16` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.17` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -966,11 +996,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.16-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.16-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.16-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.16-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.16-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.17-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.17-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.17-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.17-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.17-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
