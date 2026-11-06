@@ -37,12 +37,44 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.18-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.19-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.19 · 2026-11-07
+
+本版内容与 1.16.18 相同（设备标识 UUID 形态 + 点亮通道三处口径对齐官方），
+差异只在发布号：1.16.18 那次发布前我漏写了版本号与更新记录，补记时重打了该 tag，
+1.16.19 起不再改动历史 tag。
+
+**1. 设备标识改为 UUID v4 形态**
+
+官方客户端的 `machineId` / `sessionId` 都是**带横线的 UUID v4**（8-4-4-4-12、version 位 4、
+variant 位 8-b）；此前我们产出的是 36 位无横线 hex —— 长度相同但字符集形态不同。
+
+**2. `sessionId` 的生命周期纠正为「一次客户端运行」**
+
+官方实测：同一台机器上两次运行的 `sessionId` **不同**，`machineId` 保持不变 ——
+即 `sessionId` 属于「一次客户端运行」、`machineId` 属于「一台设备」。此前两者都按账号固定，
+`sessionId` 的生命周期是错的。现在同进程内所有账号共享一个 `sessionId`（一个客户端进程一个），
+重启后换新的。
+
+**3. 点亮通道（growth 域活跃上报）的三处口径对齐官方**
+
+`agentName` 由 `default` 改为 `cli`、`agentType` 由 `conversation` 改为 `main`、
+`traceId` 由空串改为独立 32 位 hex。凡是**抄自官方**的字段，口径必须与官方一致。
+
+同时在该文件头补写说明：这条通道发到 **billing 域**、目的是**点亮**，字段集是防御性全量；
+它与 `desktop.go` 的「官方 CLI 遥测」（发 www 域、字段按实测白名单严格对齐）**不是一回事**，
+不要用同一把尺子去量。
+
+**4. 测试**
+
+- `TestDeviceIdentifiersAreUUID`：两个标识都是 UUID v4 形态
+- `TestSessionIDLifecycle`：`sessionId` 同进程一致且与账号无关，`machineId` 按账号稳定
 
 ### v1.16.18 · 2026-11-07
 
@@ -1015,7 +1047,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.18` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.19` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1027,11 +1059,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.18-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.18-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.18-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.18-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.18-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.19-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.19-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.19-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.19-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.19-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
