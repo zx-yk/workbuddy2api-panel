@@ -44,6 +44,19 @@
 
 ## 更新记录
 
+### 版本一览
+
+> 每个版本的完整说明见下方「更新记录」对应小节。
+
+| 版本 | 一句话 | 关键改动 |
+|---|---|---|
+| **v1.16.19** | 设备标识 UUID 化 + 点亮通道口径对齐 | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
+| **v1.16.18** | 同 v1.16.19（首次发布号，补记后改用 19） | 同上 |
+| **v1.16.17** | CLI 链按官方实测字段集对齐 | 新增 `cli_fields.go` 白名单裁剪；补 `chat_tool_action`、`user_task_failed_credit_refund`；抽 `newCLIEvent` |
+| **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
+| **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
+
+
 ### v1.16.19 · 2026-11-07
 
 本版内容与 1.16.18 相同（设备标识 UUID 形态 + 点亮通道三处口径对齐官方），
