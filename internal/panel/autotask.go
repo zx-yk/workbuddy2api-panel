@@ -906,11 +906,10 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 // （紫川/人杰2 两账号无桌面客户端登录状态下 3 秒内 0/1 → 1/1）。
 // Hp_Appearance 的纯 API set 不计分（需客户端在主题下活跃），区别对待。
 func runRichMeow(p *Panel, a *auth.Auth) (string, error) {
-	ms := time.Now().UnixMilli()
 	conv := session.NewConversationID()
 	req := session.NewMessageID()
-	msg := fmt.Sprintf("req-%d-user", ms)
-	events := upstream.DesktopChatSequence(conv, req, msg, "fast-model", "fast-model")
+	msg := session.NewMessageID()
+	events := upstream.DesktopChatSequence(conv, req, msg, "", "")
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", err
 	}
@@ -985,8 +984,8 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	msgID := "msg-" + req[len(req)-8:]
-	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
+	msgID := session.NewMessageID()
+	events := upstream.DesktopChatSequence(conv, req, msgID, "", "")
 	for _, ev := range events {
 		if ev["eventCode"] == "chat_message_response" {
 			ev["finishReason"] = "tool_calls" // 模型发起工具调用（技能加载）语义
@@ -1001,7 +1000,7 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 		"fileCount":      56,
 		"source":         "workbuddy-desktop",
 		"conversationId": conv, "requestId": req, "messageId": msgID,
-		"requestModelId": "fast-model", "requestModelName": "fast-model",
+		"requestModelId": "auto", "requestModelName": "Auto",
 		"traceId": req,
 	})
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
@@ -1037,7 +1036,7 @@ func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	events := upstream.DesktopChatSequence(conv, req, session.NewMessageID(), "", "")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
@@ -1123,11 +1122,8 @@ func (p *Panel) runExpertExperience(a *auth.Auth, code string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	msgID := "msg-" + req
-	if len(req) > 8 {
-		msgID = "msg-" + req[len(req)-8:]
-	}
-	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
+	msgID := session.NewMessageID()
+	events := upstream.DesktopChatSequence(conv, req, msgID, "", "")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
@@ -1172,11 +1168,8 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	msgID := "msg-" + req
-	if len(req) > 8 {
-		msgID = "msg-" + req[len(req)-8:]
-	}
-	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
+	msgID := session.NewMessageID()
+	events := upstream.DesktopChatSequence(conv, req, msgID, "", "")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
@@ -1299,7 +1292,7 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 			continue
 		}
 		// 使用事件（JOIN 服务端 requestId）+ chat 链。
-		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+		events := append(upstream.DesktopChatSequence(conv, req, session.NewMessageID(), "", ""),
 			upstream.DesktopExpertActualUseEvent(e, conv, req))
 		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 			fail++

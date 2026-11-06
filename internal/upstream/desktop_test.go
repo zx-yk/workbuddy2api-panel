@@ -90,7 +90,12 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 
 // TestDesktopChatSequenceShape 断言完整对话事件链的事件码顺序与关键字段。
 func TestDesktopChatSequenceShape(t *testing.T) {
-	events := DesktopChatSequence("conv-1", "req-1", "msg-1", "fast-model", "fast-model")
+	const (
+		conv = "01a1aebe-4002-707d-b5fa-c9e6ba561930"
+		req  = "01a1aebe41ad7f3982cede6c5da5a6b5"
+		msg  = "01a1aebe45277249ba9f0eb5b4d5b0c1"
+	)
+	events := DesktopChatSequence(conv, req, msg, "", "")
 	wantCodes := []string{
 		"agent_task_created", "chat_message_send", "chat_request_send",
 		"chat_message_response", "chat_message_status", "chat_request_response",
@@ -110,8 +115,8 @@ func TestDesktopChatSequenceShape(t *testing.T) {
 	if resp["finishReason"] != "stop" {
 		t.Errorf("finishReason=%v want stop", resp["finishReason"])
 	}
-	if resp["conversationId"] != "conv-1" {
-		t.Errorf("conversationId=%v want conv-1", resp["conversationId"])
+	if resp["conversationId"] != conv {
+		t.Errorf("conversationId=%v want %s", resp["conversationId"], conv)
 	}
 }
 

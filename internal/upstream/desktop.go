@@ -91,8 +91,8 @@ func desktopHardware(a *auth.Auth) (cpuCores, memoryGB int, osVersion, cpuModel 
 	// 按 uid 稳定派生一台「真实存在过」的 Windows 机器参数。
 	//
 	// 表里全是**真实机器的真实组合**，取自公开的 dxdiag 报告（游戏/模拟器/切片器的
-	// issue 模板强制要求贴，量大且格式统一；采集脚本与原始数据见
-	// tools/hw-samples/）。共 57 条，覆盖 4–32 逻辑核、8–128GB、Windows 10 1809 到 11 24H2。
+	// issue 模板强制要求贴，量大且格式统一）。共 57 条，覆盖 4–32 逻辑核、
+	// 8–128GB、Windows 10 1809 到 11 24H2。
 	//
 	// 为什么不自己拼组合：cpuModel、核数、内存、build 四者必须同源。此前硬编码 9 条
 	// 是"看起来合理"的组合，现在是"确实有人这么配"的组合——后者经得起交叉核对
@@ -246,20 +246,55 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 
 // DesktopChatSequence 构造一次「桌面端成功对话」的完整事件链
 // （agent_task_created → chat_message_send → chat_request_send →
-// chat_message_response(isSuccessful) → chat_message_status → chat_request_response）。
-// 实测该链点亮 RichMeow_Chat。conversationID/requestID/messageID 由调用方生成。
+// chat_message_response → chat_message_status → chat_request_response）。
+//
+// 字段集合按官方 CLI 的真实报文对齐（2026-11-06 抓包，7 批 /v2/report）：
+//   - conversationId 全会话唯一；requestId 每请求唯一；**messageId 每轮唯一**，
+//     send / response / status 三条复用同一个；traceId 全链唯一（与 requestId 不同值）；
+//     rootRequestId = requestId；parentConversationId = conversationId
+//   - 每条会话类事件都带 codebuddy.session_id / codebuddy.conversation_request_id
+//   - 模型缺省 auto / Auto（官方在「自动选模型」时就是这两个值）
+//
+// 调用方必须传 32 位 hex 的 conversationID/requestID/messageID：
+// 早期这里发的是 msg-xxx-assistant 这类自造串，与官方形态差得一眼可辨。
 func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelName string) []DesktopEvent {
-	uuid := func() string { return requestID }
+	if modelID == "" {
+		modelID = "auto"
+	}
+	if modelName == "" {
+		modelName = "Auto"
+	}
+	traceID := session.NewMessageID() // 官方 traceId 独立于 requestId，同为 32 hex
+	now := time.Now().UnixMilli()
+
 	mk := func(code string, extra map[string]any) DesktopEvent {
-		ev := DesktopEvent{"eventCode": code}
+		ev := DesktopEvent{
+			"eventCode":                         code,
+			"conversationId":                    conversationID,
+			"requestId":                         requestID,
+			"traceId":                           traceID,
+			"rootRequestId":                     requestID,
+			"parentConversationId":              conversationID,
+			"agentName":                         "cli",
+			"agentType":                         "main",
+			"codebuddy.session_id":              conversationID,
+			"codebuddy.conversation_request_id": requestID,
+			"presentAt":                         now,
+		}
 		for k, v := range extra {
 			ev[k] = v
 		}
 		return ev
 	}
+
 	return []DesktopEvent{
+		// agent_task_created 是**桌面 UI 事件**（不属于 CLI），字段取自渲染层构造处
+		// createConversation 里的 taskCreated 对象；随后 reportConversationTaskCreated
+		// 再补 conversationId / requestId / messageId 三个。
 		mk("agent_task_created", map[string]any{
-			"source": "LOCAL", "name": "working", "task_target": "local", "mode": "craft",
+			"source": "LOCAL", "name": "working",
+			"task_target": "local", "is_worktree_task": false, "is_from_code": false,
+			"mode":           "craft",
 			"requestModelId": modelID, "requestModelName": modelName,
 			"has_repo": false, "repo_type": "none", "workspace_type": "empty",
 			"has_connector": false, "connector_types": []any{},
@@ -267,53 +302,42 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"has_template": false, "action": "", "template_name": "",
 			"has_expert": false, "expert_id": "", "expert_name": "", "expert_industry_id": "",
 			"has_skill": false, "skill_names": []any{},
-			"conversationId": conversationID, "messageId": messageID,
-			"buddyId": "", "buddyName": "",
+			"messageId": messageID,
 		}),
 		mk("chat_message_send", map[string]any{
-			"messageId": messageID + "-assistant", "historyCount": 0,
-			"isContextTruncated": false, "currentStepCount": 1,
-			"traceId": uuid(), "rootRequestId": requestID,
-			"parentConversationId": conversationID,
-			"agentName":            "cli", "agentType": "main",
+			"messageId": messageID, "requestModelId": modelID, "requestModelName": modelName,
+			"historyCount": 1, "isContextTruncated": false,
+			"currentStepCount": 1, "totalStepCount": 1, "compactionCount": 0,
 		}),
 		mk("chat_request_send", map[string]any{
-			"inputLength": 24, "isPlan": false, "isAutoExecuteTerminal": false,
-			"isAutoModify": false, "codebaseEnable": false, "maxToken": 0,
-			"maxSteps": 500, "temperature": 0, "maxRetries": 0,
+			"mode": "craft", "inputLength": 24,
+			"requestModelId": modelID, "requestModelName": modelName,
+			"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+			"codebaseEnable": false, "isMaxMode": false,
 			"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
 			"codebaseId": "", "mentionContextCount": 0, "command": "",
-			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
-			"traceId": uuid(), "rootRequestId": requestID,
-			"parentConversationId": conversationID,
-			"agentName":            "cli", "agentType": "main",
-			"codebuddy.session_id":              conversationID,
-			"codebuddy.conversation_request_id": requestID,
+			"recommendId": "", "skillId": "",
+			"vcsType": "unknown", "vcsRepo": "", "vcsBranchName": "", "vcsRevId": "",
 		}),
 		mk("chat_message_response", map[string]any{
-			"messageId": messageID + "-assistant", "responseModelId": modelID,
+			"messageId": messageID, "requestModelId": modelID, "requestModelName": modelName,
+			"responseModelId": modelID, "totalStepCount": 1,
 			"inputToken": 120, "outputToken": 80, "totalToken": 200,
 			"cachedTokens": 0, "cachedWriteTokens": 0, "cachedMissTokens": 0,
 			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
-			"firstTokenAt": time.Now().UnixMilli(), "traceId": uuid(),
-			"conversationId": conversationID,
-			"rootRequestId":  requestID, "parentConversationId": conversationID,
-			"agentName": "cli", "agentType": "main",
-			"codebuddy.session_id":              conversationID,
-			"codebuddy.conversation_request_id": requestID,
+			"firstTokenAt": now,
 		}),
 		mk("chat_message_status", map[string]any{
-			"messageId": messageID + "-assistant", "messageErrorCode": "0",
-			"traceId": uuid(), "rootRequestId": requestID,
-			"parentConversationId": conversationID,
-			"agentName":            "cli", "agentType": "main",
+			"messageId": messageID, "messageErrorCode": "0",
+			"requestModelId": modelID, "requestModelName": modelName,
 		}),
 		mk("chat_request_response", map[string]any{
 			"mode": "craft", "toolCallCount": 0,
+			"requestModelId": modelID, "requestModelName": modelName,
 			"inputToken": 120, "outputToken": 80, "totalToken": 200,
 			"cachedTokens": 0, "cachedWriteTokens": 0, "cachedMissTokens": 0,
 			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
-			"rootRequestId": requestID, "parentConversationId": conversationID,
+			"reason": "", "contentFilterMessage": "", "expertId": "",
 		}),
 	}
 }
@@ -372,7 +396,7 @@ func DesktopBuddyAppSequence(buddyID, buddyName string) []DesktopEvent {
 func DesktopAutomationCreateEvent(name string) DesktopEvent {
 	return DesktopEvent{
 		"eventCode": "automated_task_create_suc", "name": name,
-		"source": "manually", "modelId": "fast-model", "modelIsThinking": true,
+		"source": "manually", "modelId": "auto", "modelIsThinking": true,
 		"connectorCount": 0, "skills": "", "skillCount": 0,
 		"scheduleType": "once", "mode": "LOCAL",
 	}
@@ -423,7 +447,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 // template_used {template_id,task_mode}，JOIN 一条完整 chat 链。
 // 三账号实测：5 组（不同模板）一次上报 → 5/5 点亮。
 func DesktopTemplateUseSequence(conversationID, requestID, templateID, templateName string) []DesktopEvent {
-	events := DesktopChatSequence(conversationID, requestID, "msg-"+templateID, "fast-model", "fast-model")
+	events := DesktopChatSequence(conversationID, requestID, session.NewMessageID(), "", "")
 	events = append(events,
 		DesktopEvent{
 			"eventCode": "agent_task_created_with_template", "mode": "working",
@@ -438,7 +462,7 @@ func DesktopTemplateUseSequence(conversationID, requestID, templateID, templateN
 // web_element_click(playbook_ctaClick) + playbook_cta_click + playbook_prompt_send
 // （Dialog 发送 Prompt，带 conversationId/requestId JOIN chat 链）。三账号实测 1/1 点亮。
 func DesktopPlaybookPromptSequence(conversationID, requestID, caseID, caseName string) []DesktopEvent {
-	events := DesktopChatSequence(conversationID, requestID, "msg-pb", "fast-model", "fast-model")
+	events := DesktopChatSequence(conversationID, requestID, session.NewMessageID(), "", "")
 	payload := map[string]any{
 		"id": caseID, "name": caseName, "type": "document",
 		"categoryId": "", "categoryName": "",
@@ -470,7 +494,7 @@ func DesktopPlaybookPromptSequence(conversationID, requestID, caseID, caseName s
 // wbx_design_canvas_task_create + wbx_design_canvas_open（Ardot create_design 工具
 // 完成时客户端经 metrics 通道上报，同一 /v2/report 端点）。三账号实测 1/1 点亮。
 func DesktopDesignCanvasSequence(conversationID, requestID string) []DesktopEvent {
-	events := DesktopChatSequence(conversationID, requestID, "msg-canvas", "fast-model", "fast-model")
+	events := DesktopChatSequence(conversationID, requestID, session.NewMessageID(), "", "")
 	return append(events,
 		DesktopEvent{
 			"eventCode": "wbx_design_canvas_task_create", "conversationId": conversationID,
@@ -556,7 +580,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string, protect bool) (conversationID, requestID string, err error) {
 	conversationID = session.NewConversationID()
 	body := map[string]any{
-		"model": "fast-model",
+		"model": "auto",
 		"messages": []any{
 			map[string]any{"role": "system", "content": "You are a helpful assistant. 当前处于中文环境，使用简体中文回答。"},
 			map[string]any{"role": "user", "content": "1+1等于几？直接回答。"},
@@ -745,6 +769,6 @@ func desktopExpertActualUse(e MarketExpert, conversationID, requestID string) De
 		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
 		"cost": 9000, "characterCount": 14,
 		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + requestID[len(requestID)-8:],
-		"requestModelId": "fast-model", "requestModelName": "fast-model",
+		"requestModelId": "auto", "requestModelName": "Auto",
 	}
 }

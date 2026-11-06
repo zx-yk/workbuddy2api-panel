@@ -37,12 +37,45 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.14-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.15-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.15 · 2026-11-06
+
+本版把**桌面端上报事件**的字段形态对齐官方真实报文（依据：内置 CLI 指向本地 mock，抓到 7 批
+`/v2/report` 原始报文）。无配置变更，替换二进制即可。
+
+**1. `messageId` 换成官方形态，每轮一个**
+
+早期发的是 `msg-xxx-assistant` 这类自造串，官方是 32 位 hex、每轮生成一个新值，并且在
+`chat_message_send` / `chat_message_response` / `chat_message_status` 三条事件里复用同一个。
+已按此改，自动化任务也不再拿 `msg-` + requestId 尾 8 位拼串。
+
+**2. 会话类事件补齐上下文**
+
+`conversationId`、`requestId`、`traceId`、`rootRequestId`、`parentConversationId`、
+`codebuddy.session_id`、`codebuddy.conversation_request_id`、`agentName` / `agentType`
+统一由构造函数注入，不再由各调用点零散拼。`traceId` 改为独立生成 —— 官方它与 `requestId`
+是不同值，此前直接复用。
+
+**3. 各事件字段与官方报文逐项对齐**
+
+- `agent_task_created`：补 `is_worktree_task` / `is_from_code`；去掉渲染层构造处没有的
+  `buddyId` / `buddyName`
+- `chat_message_send`：补 `requestModelId` / `requestModelName` / `totalStepCount` /
+  `compactionCount`，`historyCount` 按官方报文从 0 改 1
+- `chat_request_send`：去掉官方报文里没有的 `maxToken` / `maxSteps` / `temperature` /
+  `maxRetries` / `skillCount` / `totalCount`，补 `mode` / `isMaxMode` / `vcsType` /
+  `vcsRepo` / `vcsBranchName` / `vcsRevId`
+- `chat_request_response`：补 `reason` / `contentFilterMessage` / `expertId`
+- 模型标识缺省值统一成 `auto` / `Auto`（官方「自动选模型」就是这两个值），不再写 `fast-model`
+
+新增 `TestDesktopChatSequenceWireShape` 把形态钉进测试：`messageId` 必须是 32 位小写 hex 且
+三条事件一致、`traceId` 不得等于 `requestId`、官方报文没有的字段不得出现。
 
 ### v1.16.14 · 2026-11-05
 
@@ -852,7 +885,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.14` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.15` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -864,11 +897,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.14-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.14-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.14-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.14-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.14-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.15-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.15-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.15-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.15-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.15-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
