@@ -69,7 +69,7 @@ func setDomainHeader(h http.Header, a *auth.Auth) {
 	}
 }
 
-// deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId/qimei36 复用），
+// deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId 等复用），
 // 幂等：同一账号每次生成相同值，模拟固定设备。
 func deriveID(a *auth.Auth, salt string) string {
 	sum := sha256.Sum256([]byte(salt + ":" + a.UID))
@@ -206,7 +206,7 @@ func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 
 // ReportDesktopEvent 以桌面客户端指纹向 copilot.tencent.com/v2/report 批量上报事件。
 // events 为业务载荷（eventCode 等字段由调用方给出）；公共指纹自动注入，
-// 业务字段优先（可用于覆盖 qimei36/machineId 等设备标识做真实设备对齐）。
+// 业务字段优先（可用于覆盖 machineId 等设备标识做真实设备对齐）。
 func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error {
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
