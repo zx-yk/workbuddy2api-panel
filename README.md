@@ -37,12 +37,43 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.15-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.16-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
 ## 更新记录
+
+### v1.16.16 · 2026-11-06
+
+本版按官方桌面端的真实上报报文修正事件形态。无配置变更，替换二进制即可。
+
+**1. 桌面 UI 事件与 CLI 事件分开构造**
+
+两类事件的字段集合不同：桌面 UI 事件（如 `agent_task_created`）**不带** `traceId` /
+`rootRequestId` / `parentConversationId` / `agentName` / `agentType` / `codebuddy.*`
+这些 CLI 上下文，CLI 事件才带。此前统一注入，导致 UI 事件上多出一批官方没有的字段。
+现在拆成 `mkUI` / `mkCLI` 两条构造路径。
+
+**2. `agent_task_created` 的 `messageId` 与 `requestId` 同值**
+
+官方该事件的 `messageId` 就是 `requestId`（同一串 32 位 hex），不是每轮另生成的独立值。
+
+**3. 公共指纹补 `buddyId` / `buddyName`**
+
+这两个字段每条官方事件都带（值为空串），属于公共指纹，不是渲染层私有字段 —— 之前按
+「渲染层构造处没有」把它们删掉，方向错了。
+
+**4. 新增两个事件构造器**
+
+- `DesktopTaskCompletedEvent` 对应 `agent_task_completed`：只有 `mode` / `task_id`
+  （值即会话 ID）/ `duration_ms` / `total_steps`，**没有** requestId / messageId
+- `DesktopChatResponseCompleteEvent` 对应 `chat_response_complete`：只有
+  `conversationId` / `requestId` / `artifactType`（空串）/ `source`（`work`），
+  不带 token 数与 finishReason
+
+`TestDesktopTaskEventsShape` 钉住这两个形态；`TestDesktopChatSequenceWireShape` 增加
+「UI 事件不得带 CLI 上下文」「`messageId` 必须等于 `requestId`」两条断言。
 
 ### v1.16.15 · 2026-11-06
 
@@ -923,7 +954,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.15` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.16` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -935,11 +966,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.15-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.15-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.15-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.15-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.15-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.16-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.16-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.16-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.16-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.16-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

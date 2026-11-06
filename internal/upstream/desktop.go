@@ -186,18 +186,21 @@ func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
 		"ideVersion":   c.clientVersion(),
-		"machineId":    deriveID(a, "machine"),
-		"sessionId":    deriveID(a, "session"),
-		"extName":      "workbuddy-desktop",
-		"extVersion":   c.clientVersion(),
-		"os":           "win32",
-		"arch":         "x64",
-		"osVersion":    osVersion,
-		"cpuCores":     cpuCores,
-		"cpuModel":     cpuModel,
-		"memorySize":   memoryGB,
-		"timestamp":    now,
-		"presentAt":    now,
+		// buddyId / buddyName 每条官方事件都带（值为空串），不是桌面渲染层私有字段。
+		"buddyId":    "",
+		"buddyName":  "",
+		"machineId":  deriveID(a, "machine"),
+		"sessionId":  deriveID(a, "session"),
+		"extName":    "workbuddy-desktop",
+		"extVersion": c.clientVersion(),
+		"os":         "win32",
+		"arch":       "x64",
+		"osVersion":  osVersion,
+		"cpuCores":   cpuCores,
+		"cpuModel":   cpuModel,
+		"memorySize": memoryGB,
+		"timestamp":  now,
+		"presentAt":  now,
 	}
 }
 
@@ -267,7 +270,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 	traceID := session.NewMessageID() // 官方 traceId 独立于 requestId，同为 32 hex
 	now := time.Now().UnixMilli()
 
-	mk := func(code string, extra map[string]any) DesktopEvent {
+	mkCLI := func(code string, extra map[string]any) DesktopEvent {
 		ev := DesktopEvent{
 			"eventCode":                         code,
 			"conversationId":                    conversationID,
@@ -286,12 +289,22 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 		}
 		return ev
 	}
+	// mkUI 用于桌面 UI 事件：官方报文里这类事件**没有** traceId / rootRequestId /
+	// parentConversationId / agentName / codebuddy.* 这些 CLI 上下文，只有 eventCode
+	// 与其自身业务字段。
+	mkUI := func(code string, extra map[string]any) DesktopEvent {
+		ev := DesktopEvent{"eventCode": code, "presentAt": now}
+		for k, v := range extra {
+			ev[k] = v
+		}
+		return ev
+	}
 
 	return []DesktopEvent{
 		// agent_task_created 是**桌面 UI 事件**（不属于 CLI），字段取自渲染层构造处
 		// createConversation 里的 taskCreated 对象；随后 reportConversationTaskCreated
 		// 再补 conversationId / requestId / messageId 三个。
-		mk("agent_task_created", map[string]any{
+		mkUI("agent_task_created", map[string]any{
 			"source": "LOCAL", "name": "working",
 			"task_target": "local", "is_worktree_task": false, "is_from_code": false,
 			"mode":           "craft",
@@ -302,14 +315,14 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"has_template": false, "action": "", "template_name": "",
 			"has_expert": false, "expert_id": "", "expert_name": "", "expert_industry_id": "",
 			"has_skill": false, "skill_names": []any{},
-			"messageId": messageID,
+			"messageId": requestID,
 		}),
-		mk("chat_message_send", map[string]any{
+		mkCLI("chat_message_send", map[string]any{
 			"messageId": messageID, "requestModelId": modelID, "requestModelName": modelName,
 			"historyCount": 1, "isContextTruncated": false,
 			"currentStepCount": 1, "totalStepCount": 1, "compactionCount": 0,
 		}),
-		mk("chat_request_send", map[string]any{
+		mkCLI("chat_request_send", map[string]any{
 			"mode": "craft", "inputLength": 24,
 			"requestModelId": modelID, "requestModelName": modelName,
 			"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
@@ -319,7 +332,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"recommendId": "", "skillId": "",
 			"vcsType": "unknown", "vcsRepo": "", "vcsBranchName": "", "vcsRevId": "",
 		}),
-		mk("chat_message_response", map[string]any{
+		mkCLI("chat_message_response", map[string]any{
 			"messageId": messageID, "requestModelId": modelID, "requestModelName": modelName,
 			"responseModelId": modelID, "totalStepCount": 1,
 			"inputToken": 120, "outputToken": 80, "totalToken": 200,
@@ -327,11 +340,11 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
 			"firstTokenAt": now,
 		}),
-		mk("chat_message_status", map[string]any{
+		mkCLI("chat_message_status", map[string]any{
 			"messageId": messageID, "messageErrorCode": "0",
 			"requestModelId": modelID, "requestModelName": modelName,
 		}),
-		mk("chat_request_response", map[string]any{
+		mkCLI("chat_request_response", map[string]any{
 			"mode": "craft", "toolCallCount": 0,
 			"requestModelId": modelID, "requestModelName": modelName,
 			"inputToken": 120, "outputToken": 80, "totalToken": 200,
@@ -365,6 +378,35 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	}
 	_, err = c.doJSON(req)
 	return err
+}
+
+// DesktopTaskCompletedEvent 构造官方的「任务完成」事件。
+//
+// 实测形态（桌面端 HTTP 抓包）：没有 requestId / messageId / conversationId，
+// 只有 task_id（值就是会话 ID）；duration_ms 是任务总耗时，total_steps 是步数
+// （纯问答为 1，带一次工具调用为 2）。mode 恒 LOCAL。
+func DesktopTaskCompletedEvent(conversationID string, totalSteps int, durationMs int64) DesktopEvent {
+	return DesktopEvent{
+		"eventCode":   "agent_task_completed",
+		"mode":        "LOCAL",
+		"task_id":     conversationID,
+		"duration_ms": durationMs,
+		"total_steps": totalSteps,
+	}
+}
+
+// DesktopChatResponseCompleteEvent 构造官方的「回复完成」事件。
+//
+// 实测只有四个业务字段：conversationId / requestId / artifactType / source，
+// artifactType 为空串，source 恒 "work"；不带 token 数与 finishReason。
+func DesktopChatResponseCompleteEvent(conversationID, requestID string) DesktopEvent {
+	return DesktopEvent{
+		"eventCode":      "chat_response_complete",
+		"conversationId": conversationID,
+		"requestId":      requestID,
+		"artifactType":   "",
+		"source":         "work",
+	}
 }
 
 // DesktopBuddyAppSequence 构造「进入 Buddy 应用」五连事件（实测两账号纯 API 点亮

@@ -75,6 +75,14 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if ev["userNickname"] != "RenJie" {
 		t.Errorf("userNickname=%v want RenJie", ev["userNickname"])
 	}
+	// buddyId / buddyName：官方每条事件都带（值为空串），属于公共指纹，
+	// 不是桌面渲染层的私有字段。
+	if v, ok := ev["buddyId"]; !ok || v != "" {
+		t.Errorf("buddyId=%v (present=%v) want empty string", v, ok)
+	}
+	if v, ok := ev["buddyName"]; !ok || v != "" {
+		t.Errorf("buddyName=%v (present=%v) want empty string", v, ok)
+	}
 	// cpuModel：官方桌面指纹字段，与核数同一条目派生（自洽）。
 	if _, _, _, wantModel := desktopHardware(&auth.Auth{UID: "u-dt"}); ev["cpuModel"] != wantModel {
 		t.Errorf("cpuModel=%v want %v", ev["cpuModel"], wantModel)

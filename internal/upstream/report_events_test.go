@@ -91,10 +91,18 @@ func TestDesktopChatSequenceWireShape(t *testing.T) {
 			t.Errorf("agent_task_created 缺字段 %s", k)
 		}
 	}
-	for _, k := range []string{"buddyId", "buddyName"} {
+	// agent_task_created 是桌面 UI 事件：官方报文里没有 CLI 上下文，
+	// 也没有 traceId 系列；buddyId/buddyName 由公共指纹注入，不在事件载荷里重复。
+	for _, k := range []string{"buddyId", "buddyName", "traceId", "rootRequestId",
+		"parentConversationId", "agentName", "agentType",
+		"codebuddy.session_id", "codebuddy.conversation_request_id"} {
 		if _, ok := byCode["agent_task_created"][k]; ok {
-			t.Errorf("agent_task_created 不应有 %s（渲染层构造处没有这个字段）", k)
+			t.Errorf("agent_task_created 不应有 %s（官方 UI 事件不带这些字段）", k)
 		}
+	}
+	// 官方实测：agent_task_created 的 messageId 与 requestId 同值。
+	if got := byCode["agent_task_created"]["messageId"]; got != req {
+		t.Errorf("agent_task_created messageId=%v want requestId %q", got, req)
 	}
 
 	need := map[string][]string{
@@ -116,6 +124,43 @@ func TestDesktopChatSequenceWireShape(t *testing.T) {
 	for _, k := range []string{"maxToken", "maxSteps", "temperature", "maxRetries", "skillCount", "totalCount"} {
 		if _, ok := byCode["chat_request_send"][k]; ok {
 			t.Errorf("chat_request_send 不应有 %s（官方报文里没有）", k)
+		}
+	}
+}
+
+// TestDesktopTaskEventsShape 钉住「任务完成 / 回复完成」两个事件的实测形态。
+func TestDesktopTaskEventsShape(t *testing.T) {
+	const (
+		conv = "0f6e2a1c-3b7d-4c8e-9a21-5d4f6e7a8b9c"
+		req  = "01a1b0baeedc79ad89dc35fe769911fc"
+	)
+
+	done := DesktopTaskCompletedEvent(conv, 2, 223696)
+	if done["eventCode"] != "agent_task_completed" || done["mode"] != "LOCAL" {
+		t.Errorf("agent_task_completed 头字段=%v/%v", done["eventCode"], done["mode"])
+	}
+	if done["task_id"] != conv {
+		t.Errorf("task_id=%v want conversationId", done["task_id"])
+	}
+	if done["total_steps"] != 2 || done["duration_ms"] != int64(223696) {
+		t.Errorf("steps/duration=%v/%v", done["total_steps"], done["duration_ms"])
+	}
+	for _, k := range []string{"requestId", "messageId", "conversationId"} {
+		if _, ok := done[k]; ok {
+			t.Errorf("agent_task_completed 不应有 %s（官方只有 task_id）", k)
+		}
+	}
+
+	resp := DesktopChatResponseCompleteEvent(conv, req)
+	if resp["conversationId"] != conv || resp["requestId"] != req {
+		t.Errorf("chat_response_complete 标识=%v/%v", resp["conversationId"], resp["requestId"])
+	}
+	if resp["source"] != "work" || resp["artifactType"] != "" {
+		t.Errorf("source/artifactType=%v/%v want work/\"\"", resp["source"], resp["artifactType"])
+	}
+	for _, k := range []string{"inputToken", "outputToken", "finishReason"} {
+		if _, ok := resp[k]; ok {
+			t.Errorf("chat_response_complete 不应有 %s（官方不带 token 与 finishReason）", k)
 		}
 	}
 }
