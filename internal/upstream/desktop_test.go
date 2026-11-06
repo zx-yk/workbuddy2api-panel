@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -437,5 +438,38 @@ func TestUIEventKeepsBuddyFields(t *testing.T) {
 		if _, ok := got[0][k]; !ok {
 			t.Errorf("UI 事件不该丢 %s", k)
 		}
+	}
+}
+
+// TestDeviceIdentifiersAreUUID 断言 machineId / sessionId 都是官方实测的
+// UUID v4 形态（8-4-4-4-12、version 位 4、variant 位 8-b）。
+// 此前产出的是 36 位无横线 hex —— 长度相同但字符集形态不同。
+func TestDeviceIdentifiersAreUUID(t *testing.T) {
+	uuidV4 := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	c := &Client{}
+	fp := c.desktopFingerprint(&auth.Auth{UID: "u-uuid", Nickname: "n"})
+	for _, k := range []string{"machineId", "sessionId"} {
+		v, _ := fp[k].(string)
+		if !uuidV4.MatchString(v) {
+			t.Errorf("%s=%q 不是 UUID v4 形态", k, v)
+		}
+	}
+}
+
+// TestSessionIDLifecycle sessionId 属于「一次客户端运行」：同进程内稳定，
+// 且与账号无关（同一进程的所有账号共享一个）；machineId 属于「一台设备」：按账号固定。
+func TestSessionIDLifecycle(t *testing.T) {
+	c := &Client{}
+	fp1 := c.desktopFingerprint(&auth.Auth{UID: "u-a"})
+	fp2 := c.desktopFingerprint(&auth.Auth{UID: "u-b"})
+	if fp1["sessionId"] != fp2["sessionId"] {
+		t.Error("同进程内 sessionId 应一致（一个客户端运行一个）")
+	}
+	if fp1["machineId"] == fp2["machineId"] {
+		t.Error("不同账号的 machineId 不应相同（那是设备级标识）")
+	}
+	fp3 := c.desktopFingerprint(&auth.Auth{UID: "u-a"})
+	if fp1["machineId"] != fp3["machineId"] {
+		t.Error("同一账号的 machineId 应稳定")
 	}
 }

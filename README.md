@@ -44,6 +44,37 @@
 
 ## 更新记录
 
+### v1.16.18 · 2026-11-07
+
+本版对齐官方实测的设备标识形态，并修正「点亮通道」里抄自官方却写反的三处口径。
+无配置变更，替换二进制即可。
+
+**1. 设备标识改为 UUID v4 形态**
+
+官方客户端的 `machineId` / `sessionId` 都是**带横线的 UUID v4**（8-4-4-4-12、version 位 4、
+variant 位 8-b）；此前我们产出的是 36 位无横线 hex —— 长度相同但字符集形态不同。
+
+**2. `sessionId` 的生命周期纠正为「一次客户端运行」**
+
+官方实测：同一台机器上两次运行的 `sessionId` **不同**，`machineId` 保持不变 ——
+即 `sessionId` 属于「一次客户端运行」、`machineId` 属于「一台设备」。此前两者都按账号固定，
+`sessionId` 的生命周期是错的。现在同进程内所有账号共享一个 `sessionId`（一个客户端进程一个），
+重启后换新的。
+
+**3. 点亮通道（growth 域活跃上报）的三处口径对齐官方**
+
+`agentName` 由 `default` 改为 `cli`、`agentType` 由 `conversation` 改为 `main`、
+`traceId` 由空串改为独立 32 位 hex。凡是**抄自官方**的字段，口径必须与官方一致。
+
+同时在该文件头补写说明：这条通道发到 **billing 域**、目的是**点亮**，字段集是防御性全量；
+它与 `desktop.go` 的「官方 CLI 遥测」（发 www 域、字段按实测白名单严格对齐）**不是一回事**，
+不要用同一把尺子去量。
+
+**4. 测试**
+
+- `TestDeviceIdentifiersAreUUID`：两个标识都是 UUID v4 形态
+- `TestSessionIDLifecycle`：`sessionId` 同进程一致且与账号无关，`machineId` 按账号稳定
+
 ### v1.16.17 · 2026-11-07
 
 本版按官方内置 CLI 的**实时**上报报文（本地 mock 抓取，12 批 /v2/report）修正 CLI 链事件形态。

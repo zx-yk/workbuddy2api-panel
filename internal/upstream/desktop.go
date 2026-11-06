@@ -24,13 +24,13 @@ package upstream
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -69,11 +69,48 @@ func setDomainHeader(h http.Header, a *auth.Auth) {
 	}
 }
 
-// deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId 等复用），
+// deriveID 由 uid 稳定派生一个设备标识（machineId 等复用）。
 // 幂等：同一账号每次生成相同值，模拟固定设备。
+//
+// 形态对齐官方实测（2026-11-06 抓包）：官方 machineId / sessionId 都是
+// **带横线的 UUID v4**（8-4-4-4-12，version 位 4、variant 位 8-b），
+// 此前我们产出的是 36 位无横线 hex —— 长度相同但字符集形态不同。
 func deriveID(a *auth.Auth, salt string) string {
-	sum := sha256.Sum256([]byte(salt + ":" + a.UID))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
+	return deriveUUID(salt + ":" + a.UID)
+}
+
+// deriveUUID 由任意输入确定性派生一个 UUID v4 形态的标识。
+func deriveUUID(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return formatUUID(sum[:16])
+}
+
+// formatUUID 把 16 字节排成 UUID v4 形态：version 位 4、variant 位 8-b。
+func formatUUID(b []byte) string {
+	v := make([]byte, 16)
+	copy(v, b)
+	v[6] = (v[6] & 0x0f) | 0x40
+	v[8] = (v[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
+}
+
+var (
+	procSessionOnce sync.Once
+	procSessionID   string
+)
+
+// processSessionID 本进程的一次性会话标识。
+//
+// 官方实测（2026-11-06 两轮抓包）：同一台机器上两次运行的 sessionId **不同**
+// （每轮一个新 UUID），而 machineId 保持不变 —— 即 sessionId 属于「一次客户端运行」，
+// machineId 属于「一台设备」。此前我们两者都按账号固定，sessionId 的生命周期错了。
+// 同进程内所有账号共享一个 sessionId（一个客户端进程一个），与官方一致。
+func processSessionID() string {
+	procSessionOnce.Do(func() {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("wb2a:session:%d:%d", os.Getpid(), time.Now().UnixNano())))
+		procSessionID = formatUUID(sum[:16])
+	})
+	return procSessionID
 }
 
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
@@ -190,7 +227,7 @@ func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 		"buddyId":    "",
 		"buddyName":  "",
 		"machineId":  deriveID(a, "machine"),
-		"sessionId":  deriveID(a, "session"),
+		"sessionId":  processSessionID(),
 		"extName":    "workbuddy-desktop",
 		"extVersion": c.clientVersion(),
 		"os":         "win32",

@@ -1,7 +1,22 @@
 // report.go growth 域「对话活跃上报」接口：POST {billingBase}/v2/report。
-// 照抄客户端 chat_request_send 事件形状（含 conversationId/mode/inputLength 等全字段，
-// 勿用最小 3 字段，防上游后续加严）。事件必须带 userId（=账号 uid），缺失则服务端
-// 200 但静默丢弃（实测见 REPORT-active-map.md §2）。
+//
+// ⚠️ 这条通道与 desktop.go 的「官方 CLI 遥测」不是一回事，别用同一把尺子量：
+//
+//   - 本文件：发到 **billing 域**（codebuddy.cn），目的是**点亮**（growth 连登 +
+//     first_buddy 领养前置）。服务端按域判定收不收，字段集是**防御性全量**，
+//     不是官方 CLI 报文形态的复刻 —— 官方 CLI 的遥测发到 www.workbuddy.cn，
+//     见 desktop.go 与 cli_fields.go。
+//   - desktop.go：发到 www 域，字段严格按官方实测白名单对齐。
+//
+// 本文件保留「官方 chat_request_send 没有、但点亮侧可能需要」的字段
+// （maxToken/maxSteps/temperature/maxRetries/skillCount/totalCount/fileUri），
+// 注释里写明「勿用最小 3 字段，防上游后续加严」即为此。
+//
+// 但凡**抄自官方**的字段，口径必须与官方一致（2026-11-06 实时抓包核过）：
+// agentName=cli、agentType=main、traceId 为独立 32 位 hex（同请求链内各事件同值）。
+// 此前写成 default / conversation / 空串，与官方相反。
+//
+// 事件必须带 userId（=账号 uid），缺失则服务端 200 但静默丢弃（实测见 REPORT-active-map.md §2）。
 //
 // 一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务（领养前置）。
 // 风控口径：每号每天 1 次即可（activity_hours 单时点），不做多时点高频上报。
@@ -16,6 +31,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // reportPath 活跃上报通道（实测）。
@@ -219,11 +235,11 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 		TotalCount:            0,
 		FileURI:               "",
 		PresentAt:             now,
-		TraceID:               "",
+		TraceID:               session.NewMessageID(),
 		RootRequestID:         requestID,
 		ParentConversationID:  conversationID,
-		AgentName:             "default",
-		AgentType:             "conversation",
+		AgentName:             "cli",
+		AgentType:             "main",
 		UserID:                a.UID,
 	}
 	raw, err := json.Marshal([]chatRequestEvent{ev})
