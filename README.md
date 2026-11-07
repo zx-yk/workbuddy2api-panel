@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.18-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.19-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,11 +50,38 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.19** | 达标任务不再重跑动作 | 队列与单任务入口先判达标，达标只领奖不重打行为事件；扫描期判定可压住抖动的回读 |
 | **v1.16.18** | 设备标识 UUID 化 + 点亮通道口径对齐 | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
 | **v1.16.17** | CLI 链按官方实测字段集对齐 | 新增 `cli_fields.go` 白名单裁剪；补 `chat_tool_action`、`user_task_failed_credit_refund`；抽 `newCLIEvent` |
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.19 · 2026-11-07
+
+本版修一个会「白跑动作 + 撞限流」的队列缺陷。无配置变更，替换二进制即可。
+
+**1. 已达标的任务不再重复执行自动动作**
+
+自动动作都是「补足差额」语义：`chat_5` 按差额上报 `chat_request_send`、`template_5` 按差额补 5 条。
+任务一旦达标，再跑一遍不会增加任何收益，只会把同一批行为事件重打一次。
+
+此前队列执行只看 `claimed`，达标未领（`current >= target && !claimed`）的任务会被判成待办重新执行。
+新号短时间内连着补满 `chat_5` / `template_5` / `expert_5` 三个 ×5 的循环上报后，`/v2/report`
+就会返回 `429 Too Many Requests`，队列里只剩一条 `upstream soft_rate (http 429)`——而任务
+其实早在上一次就完成了，只是没领奖。现在两个入口（队列、单任务「一键完成」）都先判达标，
+达标直接走领奖、不动动作。
+
+**2. 扫描期的达标判定不再被执行前的回读覆盖**
+
+上游计分是**异步**的：事件上报成功后，进度要过几秒才刷新。执行前回读可能短暂读到低位
+（`0/5`），只信这次回读就会把「已达标待领」重新判成待办，于是又跑一遍动作、再撞一次限流。
+
+队列条目现在携带**扫描时**的达标判定（`at_target`），执行期以它为准；达标的任务还跳过
+`taskByCodeWaiting` 的异步等待轮询（最多 12s），直接读一次并领奖（`claim` 幂等，重复领
+返回 `already_claimed` 与 0 分 0 能）。
+
+未达标的任务行为不变：仍按差额补满。反向用例 `TestGrowthQueuedUnfinishedStillRuns` 固定了这一点。
 
 ### v1.16.18 · 2026-11-07
 
@@ -1027,7 +1054,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.18` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.19` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1039,11 +1066,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.18-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.18-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.18-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.18-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.18-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.19-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.19-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.19-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.19-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.19-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

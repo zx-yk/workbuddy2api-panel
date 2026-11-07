@@ -731,10 +731,16 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"})
 		return
 	}
-	msg, err := act.run(p, a)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
-		return
+	// 已达标（含上游标 Claimable）的任务不再跑动作，直接走下面的领奖分支。
+	// 动作是「补足差额」语义，达标后重跑只会重复打行为事件（见 taskReached）。
+	msg := "进度已达标"
+	if !taskReached(before) {
+		m, err := act.run(p, a)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
+			return
+		}
+		msg = m
 	}
 	// 回读验证：上报 200 ≠ 计分（上游可能静默丢弃 + 计分异步），
 	// 用有界轮询等异步计时落定，再决定是否自动领奖（mp 任务同口径回读）。
@@ -786,6 +792,24 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	log.Printf("panel: 任务动作 uid=%s code=%s progress %s -> %s claimable=%v claimed=%v",
 		uid, act.TaskCode, progressBefore, progressAfter, claimable, resp["claimed"])
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// taskReached 任务进度是否已达目标（尚未领取）。
+//
+// 与 tasksweep 的判据同口径：Claimable 即上游认定「达标未领」，兜底用
+// target>0 && current>=target（个别口径不下发 claimable 字段）。
+// 达标之后**不应再跑自动动作**：动作都是「补足差额」语义（runChat5 按差额
+// 上报 chat_request_send、template_5 按差额补 5 条……），再跑一遍只会重复
+// 打上游行为事件。新号短时间内被重复打满一批事件会撞 /v2/report 的限流，
+// 表现为 `upstream soft_rate (http 429)`——任务其实早已完成，只是没领奖。
+func taskReached(t *upstream.Task) bool {
+	if t == nil {
+		return false
+	}
+	if t.Claimable {
+		return true
+	}
+	return t.Target > 0 && t.Current >= t.Target
 }
 
 // taskProgressText 任务进度的可读表示（回读对比用）。
