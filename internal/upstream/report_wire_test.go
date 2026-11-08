@@ -71,7 +71,10 @@ func TestReportHeadersWireCase(t *testing.T) {
 		Domain:      "www.workbuddy.cn",
 	})
 
-	resp, err := http.DefaultClient.Do(req)
+	// 必须用项目自己的 uidTransport（线上出站都经它）：它负责注入 Accept-Encoding
+	// 并挂解压链。用 http.DefaultClient 会绕过该层，测到标准库默认的 gzip，
+	// 得到与线上不一致的假基线。
+	resp, err := (&http.Client{Transport: newUIDTransport()}).Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
@@ -89,7 +92,9 @@ func TestReportHeadersWireCase(t *testing.T) {
 		"X-User-Id: 00000000-0000-4000-8000-000000000001\r\n",
 		"X-Domain: www.workbuddy.cn\r\n",
 		"Connection: keep-alive\r\n",
-		"Accept-Encoding: gzip\r\n",
+		// Accept-Encoding 由 uidTransport 统一注入官方 axios 全值（ReportHeaders 不设它，
+		// 设了反而会覆盖掉统一注入）。必须走真实 transport 才看得到这个值。
+		"Accept-Encoding: gzip, compress, deflate, br\r\n",
 		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n",
 		"Host: " + ln.Addr().String() + "\r\n",
 	}

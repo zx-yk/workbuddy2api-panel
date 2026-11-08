@@ -88,10 +88,13 @@
 `CLI/<cliVersion> WorkBuddy/<cliVersion>`，与桌面进程自身上报的三段形态区分开，
 避免出现「桌面 UA + CLI 报文」这种自相矛盾的组合。
 
-**3. 已知残留差异**
+**3. `Accept-Encoding` 由传输层统一注入，本族刻意不设**
 
-`Accept-Encoding` 仍为 Go 默认 `gzip`（官方为 `gzip, compress, deflate, br`）。手动设置会关闭
-`Transport` 的自动解压，而 Go 标准库又没有 brotli 解码器，故保留现状，不强行对齐取值。
+所有出站请求（含本通道）的 `Accept-Encoding` 由 `uidTransport` 统一注入官方 axios 全值
+`gzip, compress, deflate, br`，响应侧再由 `decodeResponseBody` 按 `Content-Encoding` 分派
+gzip / br / deflate / compress(LZW) 四种解码器。
+
+`ReportHeaders` **不设**这个头：设了会覆盖掉统一注入，反而让本通道与其它通道不一致。
 
 ### v1.16.19 · 2026-11-07
 
