@@ -1421,7 +1421,7 @@ func gzipRequestBody(body []byte) (out []byte, ok bool) {
 	}
 	var buf bytes.Buffer
 	buf.Grow(len(body) / 3)
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
 	if err != nil {
 		return body, false
 	}

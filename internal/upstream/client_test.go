@@ -896,3 +896,47 @@ func TestBusinessCode(t *testing.T) {
 		}
 	}
 }
+
+// TestGzipRequestBodyUsesDefaultLevel 钉住请求体压缩级别：必须是 gzip 默认级别（6），
+// 不是 BestSpeed(1)。
+//
+// 依据：长上下文（1 MB 级）上 L1 的产物比 L6 大 16%，而 L6 的编码耗时只从 9ms 涨到 23ms
+// （+14ms），相对 2–4s 的 TTFT 可忽略；出站按量计费，多压出来的体积是净省的。
+// 这个断言防的是「为了省 CPU 又把它调回 BestSpeed」的反向优化——那样会静默丢掉 16%。
+func TestGzipRequestBodyUsesDefaultLevel(t *testing.T) {
+	// 半重复文本：既保证可压，又让 L1 与 L6 的产物有可测差异（纯重复样本两级会压成一样）。
+	var sb bytes.Buffer
+	for i := 0; i < 800; i++ {
+		fmt.Fprintf(&sb, "func handler%d(w http.ResponseWriter, r *http.Request) { id := %d; body := \"%d\" }\n", i, i*7919, i*104729)
+	}
+	sample := sb.Bytes()
+
+	got, ok := gzipRequestBody(sample)
+	if !ok {
+		t.Fatal("样本应被压缩")
+	}
+	encode := func(lvl int) []byte {
+		var buf bytes.Buffer
+		zw, err := gzip.NewWriterLevel(&buf, lvl)
+		if err != nil {
+			t.Fatalf("level %d: %v", lvl, err)
+		}
+		if _, err := zw.Write(sample); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		return buf.Bytes()
+	}
+	l1, l6 := encode(gzip.BestSpeed), encode(gzip.DefaultCompression)
+	if bytes.Equal(l1, l6) {
+		t.Skip("样本对 L1/L6 无区分度，换样本才能验证（跳过而非假绿）")
+	}
+	if !bytes.Equal(got, l6) {
+		t.Errorf("压缩级别不是 DefaultCompression：产物与 L6 不一致（len got=%d l6=%d l1=%d）", len(got), len(l6), len(l1))
+	}
+	if bytes.Equal(got, l1) {
+		t.Errorf("压缩级别仍是 BestSpeed(L1)，会丢掉约 16%% 的上行体积")
+	}
+}

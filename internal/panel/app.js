@@ -3460,3 +3460,51 @@ if ($('btnExpFold')) {
   };
 }
 applyExpFold();
+
+// ── 运行日志页：三个区块各自折叠 ────────────────────────────────────
+// 请求记录 / 运行日志 / 积分历史 串在一页，展开时一屏放不下，移动端要滚很久。
+// 交互：点标题栏左侧三角，或直接点标题文字（移动端不用精确点中小图标）。
+// 记忆：localStorage 存每块状态；**没有记忆过**时按视口给默认——窄屏收起两张长表、
+// 日志保持展开（最常看），宽屏全部展开保持原样。用户手动切过之后就完全按用户的来。
+const LS_LOGS_FOLD = 'wb2api.logs.fold';
+function logsFoldMap() {
+  try { return JSON.parse(localStorage.getItem(LS_LOGS_FOLD) || '{}') || {}; } catch (e) { return {}; }
+}
+function saveLogsFold(k, v) {
+  const m = logsFoldMap();
+  m[k] = v;
+  try { localStorage.setItem(LS_LOGS_FOLD, JSON.stringify(m)); } catch (e) {}
+}
+function applyLogsFold() {
+  const saved = logsFoldMap();
+  const narrow = window.matchMedia('(max-width: 760px)').matches;
+  document.querySelectorAll('#view-logs .box[data-fold]').forEach(box => {
+    const k = box.dataset.fold;
+    const remembered = Object.prototype.hasOwnProperty.call(saved, k);
+    const folded = remembered ? !!saved[k] : (narrow && k !== 'log');
+    box.toggleAttribute('data-folded', folded);
+    const btn = box.querySelector(':scope > header > .fold');
+    if (btn) btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  });
+}
+// 三角按钮直接绑定：这是最明确的收起来源，不依赖坐标/委托链路。
+document.querySelectorAll('#view-logs .box[data-fold] > header > .fold').forEach(btn => {
+  btn.addEventListener('click', ev => {
+    ev.stopPropagation(); // 交给下面委托会重复 toggle，必须掐掉
+    const box = btn.closest('.box[data-fold]');
+    saveLogsFold(box.dataset.fold, !box.hasAttribute('data-folded'));
+    applyLogsFold();
+  });
+});
+// 委托兜底：点标题或标题栏留白也能折（移动端不必精确点中小三角）。
+document.addEventListener('click', ev => {
+  const box = ev.target.closest('#view-logs .box[data-fold]');
+  if (!box) return;
+  const header = box.querySelector(':scope > header');
+  if (!header || !header.contains(ev.target)) return;
+  const foldBtn = ev.target.closest('.fold');
+  if (!foldBtn && ev.target.closest('button, select, input, a')) return;
+  saveLogsFold(box.dataset.fold, !box.hasAttribute('data-folded'));
+  applyLogsFold();
+});
+applyLogsFold();

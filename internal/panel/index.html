@@ -203,6 +203,36 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .box > header select, .box > header input { width: auto; }
 .box > header h3 { white-space: nowrap; }
 .box .pad { padding: 17px; }
+
+/* ── 区块折叠（运行日志页：请求记录 / 运行日志 / 积分历史）──────────────
+   三个区块串在一页上会把页面拉得很长，移动端尤其难滚。这里给每个区块一个
+   标题栏三角开关：折叠后只留标题栏，过滤栏/表格/日志体一起藏掉。
+   状态由 app.js 写到 data-folded 并记忆到 localStorage。 */
+.box > header > .fold {
+  flex: 0 0 auto; margin-left: -6px; padding: 0; width: 24px; height: 24px;
+  display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--ink-3); border-radius: 6px;
+}
+.box > header > .fold:hover { background: var(--surface-2); color: var(--ink); }
+.box > header > .fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 三角用边框画，省掉内联 SVG：默指向下（展开态），折叠时转成指向右。 */
+.box > header > .fold::before {
+  content: ""; width: 0; height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4.5px solid transparent; border-bottom: 4.5px solid transparent;
+  transform: rotate(90deg); transition: transform .18s ease;
+}
+.box[data-folded] > header > .fold::before { transform: none; }
+.box[data-folded] > :not(header) { display: none; }
+.box[data-folded] > header { border-bottom: none; }
+/* 积分历史没有自带限高，100 条会把页面推到很远；与其他两张表对齐到 460px。 */
+#view-logs .box[data-fold="credit"] .tbl-wrap { max-height: 460px; overflow: auto; }
+/* 标题也是折叠热区（移动端不必精确点中小三角），给个手型提示。 */
+#view-logs .box[data-fold] > header > h3 { cursor: pointer; }
+@media (max-width: 760px) {
+  /* 移动端把触控区放大到 44px（HIG 最小点击目标），视觉仍只是个小三角。 */
+  .box > header > .fold { width: 44px; height: 44px; margin: -10px 0 -10px -14px; }
+}
 /* 补偿活动行：昵称 / 状态标 / 截止倒计时 / 额度 / 领取按钮，单行紧凑排布。
    沿用 .tag 体系染色（ok=已领、warn=待领、bad=临期、mute=中性信息）。 */
 .comp-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
@@ -1174,8 +1204,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
     <!-- 日志 -->
     <section class="view" id="view-logs" hidden>
-      <div class="box">
+      <div class="box" data-fold="req">
         <header>
+          <button class="fold" type="button" aria-expanded="true" aria-label="收起或展开：请求记录" title="收起 / 展开"></button>
           <h3>请求记录 <span class="hint">调用来源：IP 取 X-Forwarded-For 首段，无代理头时回落 TCP 对端</span></h3>
           <span class="grow"></span>
           <span class="note" id="reqSummary">—</span>
@@ -1212,8 +1243,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
       </div>
 
-      <div class="box">
+      <div class="box" data-fold="log">
         <header>
+          <button class="fold" type="button" aria-expanded="true" aria-label="收起或展开：运行日志" title="收起 / 展开"></button>
           <h3>运行日志</h3>
           <span class="grow"></span>
           <span class="chips" id="logChips">
@@ -1228,8 +1260,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <pre id="logBox"></pre>
       </div>
 
-      <div class="box">
+      <div class="box" data-fold="credit">
         <header>
+          <button class="fold" type="button" aria-expanded="true" aria-label="收起或展开：积分历史" title="收起 / 展开"></button>
           <h3>积分历史 <span class="hint">每次真实查到余额与上次比对，变动即留痕</span></h3>
           <span class="grow"></span>
           <span class="note" id="creditNote">—</span>
