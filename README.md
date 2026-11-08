@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.19-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.20-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,12 +50,48 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.20** | 上报通道单列专属头族 | `/v2/report` 不再与 billing 其他端点共用请求头：补 `X-Product`/`X-Request-ID`/`X-Requested-With`/完整 `Accept`·`Content-Type`，去掉该端点本不该有的三个头；上报 UA 对齐内置 CLI 两段形态 |
 | **v1.16.19** | 达标任务不再重跑动作 | 队列与单任务入口先判达标，达标只领奖不重打行为事件；扫描期判定可压住抖动的回读 |
 | **v1.16.18** | 设备标识 UUID 化 + 点亮通道口径对齐 | `machineId`/`sessionId` 改 UUID v4 形态；`sessionId` 生命周期纠正为「一次客户端运行」；点亮通道 `agentName`/`agentType`/`traceId` 对齐官方 |
 | **v1.16.17** | CLI 链按官方实测字段集对齐 | 新增 `cli_fields.go` 白名单裁剪；补 `chat_tool_action`、`user_task_failed_credit_refund`；抽 `newCLIEvent` |
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.20 · 2026-11-09
+
+本版把上报通道 `/v2/report` 的请求头从「与 billing 族共用」改成「专属头族」，对齐官方内置 CLI 的出站形态。
+无配置变更，替换二进制即可。
+
+**1. `/v2/report` 单列专属头族 `ReportHeaders`**
+
+`/v2/report` 与 billing 其他端点（签到、企业用量、补偿、试用）在官方客户端里走的是不同的请求栈，
+头集合本来就不同。此前共用一个 `BillingHeaders`，结果是上报请求**同时**缺了本端点该有的头、又多出别端点才有的头。
+
+新增 `Client.ReportHeaders`，只用于 `/v2/report`：
+
+| 项目 | 处理 |
+|---|---|
+| `Accept` | `application/json, text/plain, */*`（原为 `application/json`） |
+| `Content-Type` | `application/json;charset=UTF-8`（原缺 charset） |
+| `X-Requested-With` | 补 `XMLHttpRequest` |
+| `X-Product` | 补 `SaaS` |
+| `X-Request-ID` | 新增，32 位小写 hex。键名 `ID` 必须全大写：`Header.Set` 会规范化成 `X-Request-Id`，故用 `setExact` 直发 |
+| `Connection` | 补 `keep-alive`（传输层已禁 h2，全站 HTTP/1.1，安全） |
+| `x-codebuddy-request` / `Accept-Language` / `X-Device-Token` | **移除**：官方 CLI 与桌面进程两条链都不发这三个头，它们属于 billing 其他端点的形态 |
+
+`BillingHeaders` 一行未改，签到／企业用量／补偿／试用等端点行为完全不变。
+
+**2. 上报 UA 改为内置 CLI 进程形态**
+
+上报通道的报文由 CLI 事件构成（`agentName="cli"`），UA 相应改成两段形态
+`CLI/<cliVersion> WorkBuddy/<cliVersion>`，与桌面进程自身上报的三段形态区分开，
+避免出现「桌面 UA + CLI 报文」这种自相矛盾的组合。
+
+**3. 已知残留差异**
+
+`Accept-Encoding` 仍为 Go 默认 `gzip`（官方为 `gzip, compress, deflate, br`）。手动设置会关闭
+`Transport` 的自动解压，而 Go 标准库又没有 brotli 解码器，故保留现状，不强行对齐取值。
 
 ### v1.16.19 · 2026-11-07
 
@@ -1054,7 +1090,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.19` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.20` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1066,11 +1102,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.19-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.19-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.19-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.19-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.19-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.20-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.20-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.20-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.20-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.20-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

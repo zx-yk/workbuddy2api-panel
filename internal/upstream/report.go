@@ -57,6 +57,19 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	return c.doJSON(req)
 }
 
+// reportJSON 发 `/v2/report`（billing 域）并解信封，请求头走 ReportHeaders。
+// 与 billingJSON 的唯一区别是头族：/v2/report 的官方出站头与 billing 各族不同
+// （多 X-Product / X-Request-ID / X-Requested-With 与完整 Accept/Content-Type，
+// 少 x-codebuddy-request / Accept-Language / X-Device-Token），逐字节核对后单列。
+func (c *Client) reportJSON(a *auth.Auth, body []byte) (json.RawMessage, error) {
+	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+reportPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.ReportHeaders(req, a)
+	return c.doJSON(req)
+}
+
 // authServiceJSON 发 AuthService 那组请求（/billing/meter 族：积分查询、企业用量、
 // 签到）并解信封。
 //
@@ -246,6 +259,6 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 	if err != nil {
 		return err
 	}
-	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
+	_, err = c.reportJSON(a, raw)
 	return err
 }

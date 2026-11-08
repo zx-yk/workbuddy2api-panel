@@ -20,9 +20,12 @@ func (t uaCaptureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // TestUserAgentDefaultEmptyKeepsClientUA 默认（UserAgent/client_name 空）行为：
-// chat/refresh 路径 UA=默认 WorkBuddy 三段式；billing 路径（report/travel/balance）
+// chat/refresh 路径 UA=默认 WorkBuddy 三段式；billing 路径（travel/balance/checkin）
 // 单段 WorkBuddy/<ver>（对齐官方 banner 白名单头组，默认伪造桌面端指纹）；
 // 显式 client_name="SaaS" 才还原"billing 不设 UA"的旧行为。
+//
+// /v2/report 例外：逐字节核对后单列 ReportHeaders，UA 对齐官方内置 CLI 进程的
+// 两段形态 CLI/<cliVer> WorkBuddy/<cliVer>。
 func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -44,11 +47,12 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 			wantUA: defaultUAString,
 		},
 		{
-			name: "billing_report",
+			// 官方 CLI：CLI/2.165.0 WorkBuddy/2.165.0（两段，无桌面版本段）。
+			name: "report_cli_ua",
 			call: func(c *Client) error {
 				return c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 			},
-			wantUA: "WorkBuddy/" + defaultClientVersion,
+			wantUA: "CLI/" + defaultCliVersion + " WorkBuddy/" + defaultCliVersion,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

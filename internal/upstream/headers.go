@@ -109,6 +109,21 @@ func (c *Client) billingUA() string {
 	return "WorkBuddy/" + c.clientVersion()
 }
 
+// reportUA `/v2/report` 出站 UA：官方**内置 CLI 进程**上报时是两段形态
+// `CLI/<cliVersion> WorkBuddy/<cliVersion>`。
+//
+// 注意与桌面进程自身上报的三段形态区分：`WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`。
+// 本通道 body 是 CLI 事件（agentName="cli"），UA 与报文形态保持一致，才不产生
+// 「桌面 UA + CLI body」这种自相矛盾的组合。
+// 显式配置 c.UserAgent 时优先（运维逃生门，同其它头族）。
+func (c *Client) reportUA() string {
+	if c != nil && c.UserAgent != "" {
+		return c.UserAgent
+	}
+	v := c.cliVersion()
+	return "CLI/" + v + " WorkBuddy/" + v
+}
+
 // resolveDeviceToken 解析本次请求的 X-Device-Token 取值。
 // 优先级：auth.Auth.DeviceToken（每号）> Client.DeviceToken（config 全局）> 文件兜底。
 // 三者皆空/读失败则返回空串（调用方不注入该头，优雅降级）。
@@ -624,6 +639,55 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	c.injectDeviceToken(req, a)
 	// billing 域不走 CommonHeaders，这里单独挂 UID：连接池按账号分桶对
 	// 「账单 / 上报 / 签到」这类短 RPC 同样生效。
+	attachAccountUID(req, a)
+}
+
+// ReportHeaders `/v2/report` 专属请求头，逐头对齐官方内置 CLI 的出站形态（13 个头）：
+//
+//	POST /v2/report HTTP/1.1
+//	Accept: application/json, text/plain, */*
+//	Content-Type: application/json;charset=UTF-8
+//	X-Requested-With: XMLHttpRequest
+//	X-Request-ID: <32 位小写 hex，每批不同>
+//	X-Product: SaaS
+//	User-Agent: CLI/2.165.0 WorkBuddy/2.165.0
+//	Authorization: Bearer <token>
+//	X-User-Id: <uid>
+//	X-Domain: www.workbuddy.cn
+//	Content-Length: <n>
+//	Accept-Encoding: gzip, compress, deflate, br
+//	Host: <host>
+//	Connection: keep-alive
+//
+// 与 BillingHeaders 的差异（有意为之，不要合并）：不注入 x-codebuddy-request、
+// Accept-Language、X-Device-Token —— 官方 CLI 与桌面进程两条链都不发这三个头，
+// 它们是该族其它端点（checkin/企业用量）的形态。
+// Accept-Encoding 保持 Go 默认 gzip：手动设置会关闭 Transport 的自动解压，且官方含
+// br（Go 标准库无 brotli 解码器），属于已知残留差异。
+func (c *Client) ReportHeaders(req *http.Request, a *auth.Auth) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// 官方键名是 X-Request-ID（ID 全大写）。Header.Set 会规范化成 X-Request-Id
+	// （textproto 规则），线上就与客户端不一致，必须 setExact。
+	setExact(req.Header, "X-Request-ID", session.NewMessageID())
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("User-Agent", c.reportUA())
+	if a != nil {
+		req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+		if a.UID != "" {
+			req.Header.Set("X-User-Id", a.UID)
+		}
+		if a.EnterpriseID != "" {
+			req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+			req.Header.Set("X-Tenant-Id", a.EnterpriseID)
+		}
+		if d := a.DomainValue(); d != "" {
+			req.Header.Set("X-Domain", d)
+		}
+	}
+	// 官方显式发 keep-alive；newTransport 禁了 h2，全站 HTTP/1.1，安全。
+	req.Header.Set("Connection", "keep-alive")
 	attachAccountUID(req, a)
 }
 
