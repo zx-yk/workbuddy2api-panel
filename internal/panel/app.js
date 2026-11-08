@@ -3483,12 +3483,12 @@ function applyLogsFold() {
     const remembered = Object.prototype.hasOwnProperty.call(saved, k);
     const folded = remembered ? !!saved[k] : (narrow && k !== 'log');
     box.toggleAttribute('data-folded', folded);
-    const btn = box.querySelector(':scope > header > .fold');
+    const btn = box.querySelector(':scope > header .fold');
     if (btn) btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
   });
 }
 // 三角按钮直接绑定：这是最明确的收起来源，不依赖坐标/委托链路。
-document.querySelectorAll('#view-logs .box[data-fold] > header > .fold').forEach(btn => {
+document.querySelectorAll('#view-logs .box[data-fold] > header .fold').forEach(btn => {
   btn.addEventListener('click', ev => {
     ev.stopPropagation(); // 交给下面委托会重复 toggle，必须掐掉
     const box = btn.closest('.box[data-fold]');
