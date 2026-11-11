@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.22-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.23-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,6 +50,7 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.23** | 请求级错误不再解绑会话粘性 | 内容拦截 / 上下文超限 / 参数错误 / 工具序列不匹配这类与账号无关的拒绝，只释放在途租约、保留会话绑定，重试仍打同一个号，前缀缓存不再整段重算；依赖 `klauspost/compress` 升到 1.20.2 |
 | **v1.16.22** | 折叠块的三角与标题同行 | 三角与标题收进同一条标题行，窄屏不再出现「三角独占一行、标题掉到下一行」；标题可收缩换行，长提示折到标题下方 |
 | **v1.16.21** | 上行压缩提到默认级别 + 日志页可折叠 | 请求体 gzip 从 `BestSpeed` 升到默认级别，长上下文上行体积再降约 16%；运行日志页三块（请求记录/运行日志/积分历史）可各自折叠，移动端默认收起长表 |
 | **v1.16.20** | 上报通道单列专属头族 | `/v2/report` 不再与 billing 其他端点共用请求头：补 `X-Product`/`X-Request-ID`/`X-Requested-With`/完整 `Accept`·`Content-Type`，去掉该端点本不该有的三个头；上报 UA 对齐内置 CLI 两段形态 |
@@ -59,6 +60,34 @@
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.23 · 2026-11-12
+
+两项改动，无配置变更，替换二进制即可。
+
+**1. 请求级错误不再解绑会话粘性**
+
+现象：客户端一次请求被拒之后，同一会话的后续请求前缀缓存一直热不起来，首字延迟从秒级
+涨到十几秒。
+
+根因是失败分支的统一收尾把两件事绑在了一起——「释放在途租约」和「解绑会话绑定」。其中
+一类错误其实与账号无关：内容拦截、上下文超限、图片无效、请求体参数错误、工具调用与结果
+配对损坏。同一个 body 换任何账号都是同样的拒绝结果，所以这些分支本来就**立即返回、不换号**；
+但收尾仍解绑了会话，客户端下次重试就被分配到另一个账号上。
+
+前缀缓存按账号隔离，换号等于从头重算：十万到几十万 token 的上下文，一次重算就是十几秒的
+首字延迟，且报错越密集越会连环换号，每一跳都是全量 miss。
+
+现在这类分支只释放在途租约、保留会话绑定；账号级故障（授权失效、冷却、熔断、连败、传输层
+失败）仍按原逻辑解绑并换号——那些确实该换。
+
+**2. 依赖 `klauspost/compress` 升到 1.20.2**
+
+该版本修复了 zstd 解码在特制帧上触发 panic 的问题（CVE-2026-116591 / GO-2026-6865，
+按 CVSS 4.0 评为 8.7）。本仓库经 TLS 库间接依赖它，升级只动一行版本号，Go 语言版本未变。
+
+**仍在研究的方向**：首帧到达前补 SSE 注释帧（客户端在首字节前长时间零字节会主动断开）、
+超长上下文的分段预算、工具调用标记被截断时的出站补位。这些要做完实测再进版本。
 
 ### v1.16.22 · 2026-11-09
 
@@ -1129,7 +1158,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.22` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.23` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1141,11 +1170,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.22-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.22-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.22-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.22-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.22-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.23-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.23-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.23-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.23-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.23-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
