@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.23-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.24-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,6 +50,7 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.24** | 模型侧不可用不再熔断账号 + 同行多事件不丢内容 | `11134`（模型提供方暂时不可用）归到模型级避让，不再按 5xx 喂熔断；非流式聚合遇到「一个 data 行多个事件」时逐条解析，不再整行丢弃 |
 | **v1.16.23** | 请求级错误不再解绑会话粘性 | 内容拦截 / 上下文超限 / 参数错误 / 工具序列不匹配这类与账号无关的拒绝，只释放在途租约、保留会话绑定，重试仍打同一个号，前缀缓存不再整段重算；依赖 `klauspost/compress` 升到 1.20.2 |
 | **v1.16.22** | 折叠块的三角与标题同行 | 三角与标题收进同一条标题行，窄屏不再出现「三角独占一行、标题掉到下一行」；标题可收缩换行，长提示折到标题下方 |
 | **v1.16.21** | 上行压缩提到默认级别 + 日志页可折叠 | 请求体 gzip 从 `BestSpeed` 升到默认级别，长上下文上行体积再降约 16%；运行日志页三块（请求记录/运行日志/积分历史）可各自折叠，移动端默认收起长表 |
@@ -60,6 +61,33 @@
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.24 · 2026-11-12
+
+两项修复，无配置变更，替换二进制即可。
+
+**1. 模型提供方暂时不可用（11134）不再熔断账号**
+
+上游用 `11134` 表示某个模型的提供方暂时不可用。这类错误与账号无关：同一个模型换任何
+账号都会撞上，串行重试也一样。此前它按 HTTP 5xx 归到账号级故障，会计入熔断计数，
+而熔断阈值只有 3 次——上游某家模型抖一下，就能把一批健康账号连续熔断出池，恢复还要
+等退避到期。
+
+现在它与 `14003`（模型容量繁忙）同等对待：只对「该账号 + 该模型」置短冷却，选号时避开
+这个组合，账号本身不冷却、不计错、不熔断。冷却按命中次数退避，命中带 `Retry-After`
+时以其为准（上限与 14003 相同）。
+
+**2. 一个 data 行里有多个事件时逐条解析**
+
+非流式请求的上游仍是 SSE，由网关聚合成一条完整响应。聚合按行读 `data: ` 前缀后直接
+反序列化，一旦该行含多个事件——重复的 `data: ` 前缀，或两个 JSON 直接相邻——整行解析
+失败就被静默丢弃，客户端拿到的是缺段的回答，日志里只表现为「没有有效数据事件」。
+
+现在正常形态走原来的快路径（一次解析，不新增开销）；只有快路径失败时才按前缀边界与
+相邻 JSON 切分，逐条解析，畸形片段只丢自己，不牵连同行其它事件。
+
+**仍在研究的方向**：首帧到达前补 SSE 注释帧、超长上下文的分段预算、签到瞬时失败的
+进程内补签。这些要做完实测再进版本。
 
 ### v1.16.23 · 2026-11-12
 
@@ -1158,7 +1186,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.23` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.24` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1170,11 +1198,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.23-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.23-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.23-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.23-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.23-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.24-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.24-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.24-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.24-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.24-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

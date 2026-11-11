@@ -87,6 +87,59 @@ func IsStreamReadError(err error) bool {
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
+// decodeDataPayload 解析一个 data 行的载荷，返回其中所有可解析的事件对象。
+//
+// 正常形态是一行一个 JSON，走快路径（一次 Unmarshal，不新增分配）。上游偶尔把多个
+// 事件塞进同一行，两种表现都见过：重复的 "data: " 前缀，或两个 JSON 直接相邻。
+// 此前整行 Unmarshal 失败即静默丢弃，客户端看到的是缺段的回答；这里只在快路径失败
+// 时才切分重试，正常流量的开销为零。
+func decodeDataPayload(payload string) []map[string]any {
+	var one map[string]any
+	if json.Unmarshal([]byte(payload), &one) == nil {
+		return []map[string]any{one}
+	}
+	segs := []string{payload}
+	if strings.Contains(payload, "data:") {
+		segs = splitDataPrefix(payload)
+	}
+	var out []map[string]any
+	for _, seg := range segs {
+		seg = strings.TrimSpace(seg)
+		if seg == "" || seg == "[DONE]" {
+			continue
+		}
+		// 用流式解码器吃掉一段里连续出现的多个 JSON（{...}{...}）。
+		dec := json.NewDecoder(strings.NewReader(seg))
+		for {
+			var obj map[string]any
+			if err := dec.Decode(&obj); err != nil {
+				break
+			}
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
+// splitDataPrefix 把一行里重复出现的 "data:" 前缀切开，返回各段载荷。
+// 前缀后可能有一个空格，也可能没有。
+func splitDataPrefix(s string) []string {
+	var out []string
+	for {
+		i := strings.Index(s, "data:")
+		if i < 0 {
+			if strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+			return out
+		}
+		if i > 0 {
+			out = append(out, s[:i])
+		}
+		s = strings.TrimPrefix(s[i+len("data:"):], " ")
+	}
+}
+
 func Aggregate(r io.Reader) (map[string]any, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
@@ -212,9 +265,11 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				sawDone = true
 				break
 			} else {
-				var chunk map[string]any
-				if json.Unmarshal([]byte(payload), &chunk) == nil {
-					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
+				// 一个 data 行可能塞了多个事件（重复 data: 前缀，或两个 JSON 直接相邻）。
+				// 逐条取出：某一条畸形只丢那一条，不再因为整行 Unmarshal 失败而吞掉同行的
+				// 正文——那会让客户端拿到缺段的回答，且日志里只看到「空流」。
+				for _, chunk := range decodeDataPayload(payload) {
+					// 有效事件计数：仅解析成功的事件计入（畸形片段不计）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
 						id = v

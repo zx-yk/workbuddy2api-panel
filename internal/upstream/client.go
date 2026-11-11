@@ -333,6 +333,13 @@ func ModelRateLimitCode(body string) int {
 // 只认结构化业务码，避免 requestId 等字段中的数字造成误判；6004 仍保持模型限流语义。
 func IsModelBusy(body string) bool { return hasBusinessCode(body, "14003") }
 
+// IsModelUnavailable 判定 11134「模型提供方暂时不可用」。
+//
+// 与 14003（模型容量繁忙）同属 (账号, 模型) 侧的暂时性窗口：同一个模型换任何账号
+// 都会撞上，账号本身健康。此前它按 HTTP 5xx 归到 ErrServer，会计入熔断（阈值 3），
+// 于是上游某个模型提供方抖一下，就会把一批健康账号熔断出池。
+func IsModelUnavailable(body string) bool { return hasBusinessCode(body, "11134") }
+
 // queueFields 6020/6021 回应体里的排队信息。
 type queueFields struct {
 	Position   int
@@ -744,9 +751,11 @@ func Classify(status int, body string) ErrKind {
 	if kind := officialCodeKind(body); kind != ErrNone {
 		return kind
 	}
-	// 14003 是模型容量繁忙，不是账号级限流：先按结构化业务码分流，避免落入
-	// 通用 429 后给整个账号施加软冷却。6004 的模型限流语义保持不变。
-	if IsModelBusy(body) {
+	// 14003 模型容量繁忙 / 11134 模型提供方暂时不可用：都是 (账号,模型) 侧的暂时性
+	// 窗口，不是账号级故障。先按结构化业务码分流，避免落入 5xx 后喂熔断计数
+	// （阈值 3，上游抖一下就会熔掉一批健康号），也避免落入通用 429 后软冷却整号。
+	// 6004 的模型限流语义保持不变。
+	if IsModelBusy(body) || IsModelUnavailable(body) {
 		return ErrModelBusy
 	}
 	// 6020 queue.waiting / 6021 queue.full 是渠道级容量信号，不是账号问题。

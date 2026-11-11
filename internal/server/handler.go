@@ -2024,7 +2024,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if uerr != nil {
 			retryAfter = uerr.RetryAfter
 		}
-		h.cfg.Pool.CooldownModelBusy(uid, model, retryAfter, "14003 model capacity busy")
+		reason := "14003 model capacity busy"
+		if upstream.IsModelUnavailable(body) {
+			reason = "11134 model unavailable"
+		}
+		h.cfg.Pool.CooldownModelBusy(uid, model, retryAfter, reason)
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」/11158「该账号类型无此模型权限」：
 		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），
