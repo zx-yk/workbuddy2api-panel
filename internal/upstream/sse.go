@@ -604,20 +604,24 @@ type streamOptions struct {
 	rescue       func() (io.Reader, func(), error)
 }
 
-// defaultStreamPingInterval 上游静默多久发一次保活注释帧。
+// DefaultStreamPingInterval 静默多久写一个保活注释帧。
 //
-// 取 1.5 秒而不是更长：客户端在「建连后零字节」状态下往往等几秒就主动断开——
-// 线上 interrupted 请求里绝大多数 duration 与 ttfb 几乎相等，说明断开就发生在
-// 首字节到达的那一刻，而不是用户手动停止。本路径首帧到达前一个字节都不写
-// （首帧否决设计，用于首帧即失败时静默换号），而长上下文的 TTFB 有 2–5 秒，
-// 这段空窗只能靠注释帧填住，否则客户端等不到内容就走了。
+// 取 1 秒的依据是客户端的耐心，不是服务端的偏好：线上被标记为 interrupted 的
+// 请求里，绝大多数「总耗时」与「首字节耗时」几乎相等（1264/1265、1114/1115、
+// 1410/1410…），说明客户端在首字节到达前就断开了。也就是说等待窗口只有 1 秒
+// 量级，间隔再长就等于从未发出过。
 //
-// 代价：注释帧会提交响应头，此后轮转全败也无法再改状态码，只能以 200 + error
-// 帧收尾（handler 末端按「响应头是否已提交」分流）。注释帧是 SSE 规范里的 no-op，
-// 客户端不会当成内容；空回复救援按正文层判断，同样不受影响。
-const defaultStreamPingInterval = 1500 * time.Millisecond
+// 两处保活共用这一个值，保持「客户端任意时刻最多 1 秒收不到字节」的单一语义：
+//   - handler 层（server.streamKeepAlive）：覆盖建连 + 选中账号 + 上游排队/预填，
+//     也就是拿到响应头之前的整段空窗；
+//   - 流内（本文件的 StreamHint）：覆盖「已开流、首内容帧未到」，例如上游先发
+//     role 帧、随后长时间思考。
+//
+// 注释帧是 SSE 规范里的 no-op，客户端不会解析成内容；空回复救援按正文层判断，
+// 同样不受影响。
+const DefaultStreamPingInterval = time.Second
 
-// WithPingInterval 覆盖静默保活间隔（<=0 使用默认 20 秒）。
+// WithPingInterval 覆盖静默保活间隔（<=0 使用 DefaultStreamPingInterval）。
 func WithPingInterval(d time.Duration) StreamOption {
 	return func(o *streamOptions) { o.pingEvery = d }
 }
@@ -740,7 +744,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	}
 	pingEvery := o.pingEvery
 	if pingEvery <= 0 {
-		pingEvery = defaultStreamPingInterval
+		pingEvery = DefaultStreamPingInterval
 	}
 	stopPing := make(chan struct{})
 	var pingWG sync.WaitGroup

@@ -916,6 +916,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolTotal, _, _, _, _ := h.cfg.Pool.CountsDetailed()
 	maxSoftRateSwaps := poolTotal + h.cfg.MaxRotate
 	softRateSwaps := 0
+	// 流式请求从这一刻起开始保活：选号、建连、上游排队与预填全部算在内。
+	// 这段是客户端最没耐心的窗口，而流内保活（计时起点是响应头到达）覆盖不到。
+	// 详见 streamKeepAlive 的注释与 upstream.DefaultStreamPingInterval。
+	var keepAlive *streamKeepAlive
+	if peek.Stream {
+		keepAlive = newStreamKeepAlive(w)
+		w = keepAlive
+		keepAlive.start(upstream.DefaultStreamPingInterval)
+		defer keepAlive.stop()
+	}
 	attempt := 0
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		attempt++
@@ -1121,10 +1131,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
 					msg = "content blocked by upstream content firewall"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
+				downgraded := writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
 					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
+				recordErrorOutcome(st, http.StatusBadRequest, downgraded)
 				return
 			}
 			// 11115「prompt is too long」：立即透传上游原文回客户端，**不罚号不轮转**
@@ -1136,10 +1145,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				failKeepBinding()
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
+				downgraded := writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
+				recordErrorOutcome(st, http.StatusBadRequest, downgraded)
 				return
 			}
 			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
@@ -1151,10 +1159,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "image request was rejected by upstream"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
+				downgraded := writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
 					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
+				recordErrorOutcome(st, http.StatusBadRequest, downgraded)
 				return
 			}
 			// 请求体解析失败（11101）：与 11115 / 图片无效同一哲学——同一 body 换任何
@@ -1169,10 +1176,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "chat request body was rejected by upstream"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
+				downgraded := writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
 					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
+				recordErrorOutcome(st, http.StatusBadRequest, downgraded)
 				return
 			}
 			// 11148 工具调用记录损坏：与 ErrBadParams 同待遇。同一 body 换任何账号
@@ -1186,10 +1192,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "tool_call_sequence_broken: tool_calls and tool results do not match"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_sequence_broken", msg,
+				downgraded := writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_sequence_broken", msg,
 					h.hintOf(upstream.ErrToolSequence, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				st.outcome = reqlog.OutcomeHTTPError
+				recordErrorOutcome(st, http.StatusBadRequest, downgraded)
 				return
 			}
 			// 14003 是 (账号,模型) 的暂时性容量窗口：写短冷却后继续换号，
@@ -1278,6 +1283,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
+			// 交棒给流内保活。必须在这里停：StreamHint 会重设响应头，与注释帧
+			// goroutine 抢同一张 Header map；两者并发写同一 ResponseWriter 也没有
+			// 意义——流内保活在它自己的锁下写，覆盖「已开流、首帧未到」。
+			keepAlive.stop()
 			stats := newChatStatsReaderSince(rc, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
@@ -1327,6 +1336,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.applyErrorPolicy(acct.UID, ff.Kind, ff.Body, bareModel, nil)
 				fail(acct.UID)
 				lastErr = &upstream.Error{Kind: ff.Kind, Status: http.StatusOK, Msg: ff.Body}
+				if keepAlive.Committed() {
+					// 外层保活注释帧已经把响应头提交成 200：此时换号也换不回一个
+					// 干净的状态码。上游原文照实写进流内 error 帧收尾，宁可让客户端
+					// 看到真实错误，也不要再伪装成「还能换号」。
+					writeStreamErrorFrame(w, map[string]any{
+						"message": ff.Body,
+						"type":    "api_error",
+						"code":    ff.Kind.String(),
+					})
+					st.status = http.StatusBadGateway
+					st.outcome = reqlog.OutcomeStreamError
+					log.Printf("WARN: [server] stream acct=%s model=%s: first frame rejected kind=%s — header already committed by keep-alive, error frame written",
+						logfmt.Label(acct.UID, acct.Nickname), bareModel, ff.Kind)
+					return
+				}
 				log.Printf("INFO: [server] stream acct=%s model=%s: first frame rejected kind=%s — rotating (no byte written yet)",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, ff.Kind)
 				if !rotateBackoff(attempt-1, r.Context()) {
@@ -1672,9 +1696,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Del("Retry-After")
 	}
-	writeOpenAIErrorHint(w, status, code, msg, hint)
-	st.status = status
-	st.outcome = reqlog.OutcomeHTTPError
+	downgraded := writeOpenAIErrorHint(w, status, code, msg, hint)
+	recordErrorOutcome(st, status, downgraded)
 }
 
 // tokensPerSecond 计算吐字速率（token/s），返回 (速率, 是否有意义)。
@@ -2058,13 +2081,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]any{
-			"message": msg,
-			"type":    "api_error",
-			"code":    code,
-		},
-	})
+	writeOpenAIErrorHint(w, status, code, msg, "")
 }
 
 // wafCooldownBase WAF 403 软冷却基数（建议 60s 起；抖动 ±25% 后落 [45s,75s]，
@@ -2077,19 +2094,57 @@ const wafCooldownBase = 60 * time.Second
 // writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
 // message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
-func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) {
-	if hint == "" {
-		writeOpenAIError(w, status, code, msg)
+// writeOpenAIErrorHint 写出 OpenAI 兼容的错误响应，返回是否被降级成流内 error 帧。
+//
+// 降级的条件只有一个：响应头已被流式保活注释帧提交（状态码已定死成 200）。此时
+// 再写状态码和 JSON 正文，客户端会在一条已开的 SSE 流里读到一段解析不了的内容；
+// 改成流内 error 帧后，SDK 按「上游中途报错」处理——与真实形态一致。
+func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) bool {
+	inner := map[string]any{
+		"message": msg,
+		"type":    "api_error",
+		"code":    code,
+	}
+	if hint != "" {
+		inner["gateway_hint"] = hint
+	}
+	if k, ok := w.(interface{ Committed() bool }); ok && k.Committed() {
+		writeStreamErrorFrame(w, inner)
+		return true
+	}
+	writeJSON(w, status, map[string]any{"error": inner})
+	return false
+}
+
+// writeStreamErrorFrame 在已提交的流里写出错误终态：一帧 error + 结束帧。
+//
+// 形状与上游的 error 帧一致（顶层 error 对象 + data: [DONE]），客户端不需要为
+// 网关产生的错误单独写一套解析。
+func writeStreamErrorFrame(w http.ResponseWriter, inner map[string]any) {
+	raw, err := json.Marshal(map[string]any{"error": inner})
+	if err != nil {
 		return
 	}
-	writeJSON(w, status, map[string]any{
-		"error": map[string]any{
-			"message":      msg,
-			"type":         "api_error",
-			"code":         code,
-			"gateway_hint": hint,
-		},
-	})
+	if _, werr := fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw); werr != nil {
+		return
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// recordErrorOutcome 收敛错误请求的请求日志口径。
+//
+// 降级时线上真实状态是 200（响应头已被保活注释帧提交），但 status 列仍记「这是
+// 哪一类错误」，另用 outcome=stream_error 标明客户端是在流里收到的——与上游中途
+// 报错帧的既有口径一致，避免把这类请求记成纯 HTTP 4xx 而掩盖「流已开」的事实。
+func recordErrorOutcome(st *chatStat, status int, downgraded bool) {
+	st.status = status
+	if downgraded {
+		st.outcome = reqlog.OutcomeStreamError
+		return
+	}
+	st.outcome = reqlog.OutcomeHTTPError
 }
 
 // hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
