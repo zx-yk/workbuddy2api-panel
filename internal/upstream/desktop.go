@@ -529,7 +529,11 @@ func DesktopBuddyAppSequence(buddyID, buddyName string) []DesktopEvent {
 	return []DesktopEvent{
 		mk("buddyapp_discover_click", nil),
 		mk("buddyapp_show", map[string]any{"elementId": buddyID, "elementName": buddyName, "position": 2}),
-		mk("buddyapp_enter_click", map[string]any{"elementId": buddyID, "elementName": buddyName, "position": 2, "isFirstPage": "1"}),
+		// isFirstPage 必须是布尔：上游的格式校验按 schema 校验类型，字符串 "1" 会被
+		// 整条事件判为 invalid（2026-11-13 实测：同一条事件发 "1" → 400
+		// invalidIndices；发 true → code 0）。此前发字符串，老账号是在加严之前点亮的，
+		// 新账号则一直卡在 0/1。
+		mk("buddyapp_enter_click", map[string]any{"elementId": buddyID, "elementName": buddyName, "position": 2, "isFirstPage": true}),
 		mk("buddyapp_auth_confirm_click", map[string]any{"elementId": buddyID, "elementName": buddyName}),
 		mk("buddyapp_bindaccount_skip_click", map[string]any{"elementId": buddyID, "elementName": buddyName}),
 	}

@@ -473,3 +473,34 @@ func TestSessionIDLifecycle(t *testing.T) {
 		t.Error("同一账号的 machineId 应稳定")
 	}
 }
+
+// buddyapp 五连事件的**字段类型**必须与上游 schema 对齐，不是"值看起来对"就行。
+//
+// 2026-11-13 实测：`buddyapp_enter_click` 的 isFirstPage 发字符串 "1" 时，整条事件被
+// 上游的格式校验判为 invalid（400 code=10001，invalidIndices=[2]），同一请求里另外 4 条
+// 事件照常接收；把该字段改成布尔 true 后立即 code=0。此前线上发的是字符串——老账号是
+// 校验加严之前点亮的历史结果，新账号则一直卡在 0/1。
+//
+// 这条断言的价值在于：即使有人把 `"1"` 改回来，值也不变（都是"1"的真值），只有类型变了，
+// 肉眼看 diff 极易放过。
+func TestBuddyAppSequenceFieldTypes(t *testing.T) {
+	evs := DesktopBuddyAppSequence("cb_x", "某助手")
+	if len(evs) != 5 {
+		t.Fatalf("事件数应为 5，实际 %d", len(evs))
+	}
+	if code := evs[2]["eventCode"]; code != "buddyapp_enter_click" {
+		t.Fatalf("索引 2 应是 buddyapp_enter_click，实际 %v", code)
+	}
+	if v, ok := evs[2]["isFirstPage"]; !ok || v != true {
+		t.Errorf("isFirstPage 必须是布尔 true（上游按 schema 校验类型），实际 %#v", v)
+	}
+	// position 反过来必须是数字：改成字符串同样会被判 invalid（已验证）。
+	if v, ok := evs[2]["position"]; !ok || v != 2 {
+		t.Errorf("position 必须是数字 2，实际 %#v", v)
+	}
+	for i, ev := range evs {
+		if _, ok := ev["eventCode"].(string); !ok {
+			t.Errorf("索引 %d 缺 eventCode 字符串", i)
+		}
+	}
+}

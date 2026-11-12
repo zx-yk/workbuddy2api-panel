@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.26-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.27-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,6 +50,7 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.27** | buddyapp 事件字段类型修正 | 进入应用事件里的 `isFirstPage` 一直发的字符串 `"1"`，上游按 schema 校验类型判为非法，导致整条事件被丢弃、任务永远 0/1；改为布尔 `true` |
 | **v1.16.26** | 首字节之前也保活 | 保活从「拿到上游响应头」提前到「请求一进转发循环」，覆盖选号、建连、上游排队与预填；间隔统一为 1 秒；响应头已被注释帧提交时错误改为流内 error 帧 |
 | **v1.16.25** | 流式保活帧间隔收到 1.5 秒 | 流内注释帧间隔从 20 秒收紧（原值比客户端等待窗口长一个数量级，等于从未发出过）。该版只覆盖「已开流、首帧未到」，响应头之前那一段由 v1.16.26 补上 |
 | **v1.16.24** | 模型侧不可用不再熔断账号 + 同行多事件不丢内容 | `11134`（模型提供方暂时不可用）归到模型级避让，不再按 5xx 喂熔断；非流式聚合遇到「一个 data 行多个事件」时逐条解析，不再整行丢弃 |
@@ -63,6 +64,31 @@
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.27 · 2026-11-13
+
+一处字段类型修正，无配置变更，替换二进制即可。
+
+**「进入应用」事件链里的 `isFirstPage` 必须是布尔，不是字符串**
+
+buddyapp 五连事件中第 3 条（`buddyapp_enter_click`）一直发 `isFirstPage: "1"`。上游的格式
+校验按 schema 校验类型，字符串被判为非法：整批 5 条事件里 4 条正常接收、这一条被丢弃，
+接口返回 400 与 `partial success: kept=4 events, dropped=1 events`，任务因此永远停在 0/1。
+
+对照实验（同一条事件、同一账号，只改一个字段）：
+
+| 形态 | 结果 |
+|---|---|
+| `isFirstPage: "1"`（原样） | 400，整条被拒 |
+| `isFirstPage: true` | code 0，正常接收 |
+| 不带该字段 | code 0，正常接收 |
+| `position` 改成字符串 | 400（position 必须保持数字） |
+
+改成布尔 `true` 后，真实五连事件一次通过。历史账号此前能点亮，是因为它们完成于上游加严
+校验之前；新账号会稳定失败。
+
+已加回归用例钉住字段类型：把 `true` 改回 `"1"` 时值不变、只有类型变，肉眼看 diff 极易放过，
+测试会直接报 `isFirstPage 必须是布尔 true`。
 
 ### v1.16.26 · 2026-11-12
 
@@ -1243,7 +1269,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.26` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.27` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1255,11 +1281,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.26-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.26-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.26-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.26-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.26-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.27-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.27-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.27-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.27-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.27-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。
