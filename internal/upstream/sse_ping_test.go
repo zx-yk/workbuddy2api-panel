@@ -121,3 +121,16 @@ func TestStreamHintTinyPositivePingInterval(t *testing.T) {
 		t.Fatalf("正文丢失：%q", w.Body.String())
 	}
 }
+
+// 保活间隔必须显著小于「客户端零字节等待窗口」。
+//
+// 线上 interrupted 请求里绝大多数 duration 与 ttfb 几乎相等——客户端在首字节到达前
+// 等几秒就走了。间隔若接近或超过这个窗口，注释帧永远来不及发，等于没有保活。
+func TestDefaultStreamPingIntervalShortEnough(t *testing.T) {
+	if defaultStreamPingInterval > 3*time.Second {
+		t.Fatalf("默认保活间隔 %v 过长：客户端在零字节状态等几秒就会断开", defaultStreamPingInterval)
+	}
+	if defaultStreamPingInterval <= 0 {
+		t.Fatalf("默认保活间隔必须为正，实际 %v", defaultStreamPingInterval)
+	}
+}

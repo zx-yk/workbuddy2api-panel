@@ -37,7 +37,7 @@
 >
 > 请自行评估风险：上游随时可能进一步收紧导致不可用；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 
-> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.24-panel，维护中）**。
+> **版本谱系**：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（初代，已删库）→ [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（面板化增强，2026-10-21 停更）→ **本 `integrated` 分支（1.16.25-panel，维护中）**。
 > 本分支基线为上游最后一版 `73a7560`，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留；功能差异见[与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
@@ -50,6 +50,7 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.25** | 流式保活帧间隔收到 1.5 秒 | 首帧到达前每 1.5 秒写一个 SSE 注释帧，客户端不再因为长时间零字节而放弃等待（原间隔 20 秒，比客户端等待窗口长一个数量级） |
 | **v1.16.24** | 模型侧不可用不再熔断账号 + 同行多事件不丢内容 | `11134`（模型提供方暂时不可用）归到模型级避让，不再按 5xx 喂熔断；非流式聚合遇到「一个 data 行多个事件」时逐条解析，不再整行丢弃 |
 | **v1.16.23** | 请求级错误不再解绑会话粘性 | 内容拦截 / 上下文超限 / 参数错误 / 工具序列不匹配这类与账号无关的拒绝，只释放在途租约、保留会话绑定，重试仍打同一个号，前缀缓存不再整段重算；依赖 `klauspost/compress` 升到 1.20.2 |
 | **v1.16.22** | 折叠块的三角与标题同行 | 三角与标题收进同一条标题行，窄屏不再出现「三角独占一行、标题掉到下一行」；标题可收缩换行，长提示折到标题下方 |
@@ -61,6 +62,27 @@
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.25 · 2026-11-12
+
+一处参数修复，无配置变更，替换二进制即可。
+
+**流式保活帧的间隔从 20 秒收到 1.5 秒**
+
+流式路径在首帧到达前不向客户端写任何字节——这是首帧否决设计：上游第一个帧就是失败帧
+时，还没写出去的响应头可以拿来静默换号。代价是客户端从建连起就是零字节等待，而长上下文
+的首字节延迟常有 2–5 秒。
+
+本路径一直有保活注释帧（`: ping`），间隔却是 20 秒，比客户端的等待窗口长一个数量级，
+实际上等于从未发出过。请求日志印证了这一点：被标记为 interrupted 的请求里，绝大多数
+「总耗时」与「首字节耗时」几乎相等——说明客户端是在首字节到达前就断开，而不是用户手动停止。
+
+现在改为 1.5 秒：客户端在等待期间能周期性收到注释帧，不会因为长时间没有响应而放弃。
+注释帧是 SSE 规范里的 no-op，客户端不会解析成内容。
+
+三个不影响：首帧否决看的是「是否已写出内容帧」，注释帧不改变该状态，换号后新流内容照常
+写出；空回复救援按正文层判断，注释帧不含正文；流式路径本就一开流即返回、不再轮转，
+全号失败时由既有逻辑写 error 帧 + `[DONE]` 收尾。
 
 ### v1.16.24 · 2026-11-12
 
@@ -1186,7 +1208,7 @@ docker run -d --name workbuddy2api \
   ghcr.io/zx-yk/workbuddy2api-panel:latest
 ```
 
-可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.24` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
+可用 tag：`latest` 与 `integrated`（跟默认分支）、`1.16.25` / `1.16`（`v*` 发版时，无 `1` 这档）、`sha-xxxxxxx`（钉某次提交）。
 镜像内容与仓库 `Dockerfile` 一致：四个二进制（`wb2api` / `signin_bin` / `login` / `credit`）+ 三个运维脚本 + `scripts/probe_active.py`，低权限用户 UID 10001，自带 HEALTHCHECK。
 
 > 包是公开的，`docker pull` **不需要** `docker login ghcr.io`。
@@ -1198,11 +1220,11 @@ docker run -d --name workbuddy2api \
 
 | 资产 | 说明 |
 |---|---|
-| `wb2api-panel-v1.16.24-linux-amd64.tar.gz` | amd64，服务器最常见 |
-| `wb2api-panel-v1.16.24-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
-| `wb2api-panel-v1.16.24-darwin-amd64.tar.gz` | Intel Mac |
-| `wb2api-panel-v1.16.24-darwin-arm64.tar.gz` | Apple Silicon |
-| `wb2api-panel-v1.16.24-windows-amd64.zip` | Windows |
+| `wb2api-panel-v1.16.25-linux-amd64.tar.gz` | amd64，服务器最常见 |
+| `wb2api-panel-v1.16.25-linux-arm64.tar.gz` | arm64，树莓派 / 部分 NAS |
+| `wb2api-panel-v1.16.25-darwin-amd64.tar.gz` | Intel Mac |
+| `wb2api-panel-v1.16.25-darwin-arm64.tar.gz` | Apple Silicon |
+| `wb2api-panel-v1.16.25-windows-amd64.zip` | Windows |
 | `checksums.txt` | 全部资产的 sha256 |
 
 每个包内含：`wb2api` + `signin_bin` + `login` + `credit` 四个二进制、`login.sh` / `signin.sh` / `credit.sh`、`scripts/probe_active.py`、`config.example.json`、`README.md`。

@@ -605,8 +605,17 @@ type streamOptions struct {
 }
 
 // defaultStreamPingInterval 上游静默多久发一次保活注释帧。
-// SSE 注释帧不影响 data 事件语义，20 秒默认间隔可避免代理因连接空闲而断流。
-const defaultStreamPingInterval = 20 * time.Second
+//
+// 取 1.5 秒而不是更长：客户端在「建连后零字节」状态下往往等几秒就主动断开——
+// 线上 interrupted 请求里绝大多数 duration 与 ttfb 几乎相等，说明断开就发生在
+// 首字节到达的那一刻，而不是用户手动停止。本路径首帧到达前一个字节都不写
+// （首帧否决设计，用于首帧即失败时静默换号），而长上下文的 TTFB 有 2–5 秒，
+// 这段空窗只能靠注释帧填住，否则客户端等不到内容就走了。
+//
+// 代价：注释帧会提交响应头，此后轮转全败也无法再改状态码，只能以 200 + error
+// 帧收尾（handler 末端按「响应头是否已提交」分流）。注释帧是 SSE 规范里的 no-op，
+// 客户端不会当成内容；空回复救援按正文层判断，同样不受影响。
+const defaultStreamPingInterval = 1500 * time.Millisecond
 
 // WithPingInterval 覆盖静默保活间隔（<=0 使用默认 20 秒）。
 func WithPingInterval(d time.Duration) StreamOption {
