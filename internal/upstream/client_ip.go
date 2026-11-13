@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -39,7 +40,15 @@ func (c *Client) resolveReportClientIP(a *auth.Auth) string {
 		if err != nil {
 			return
 		}
-		cli := &http.Client{Timeout: reportClientIPTimeout}
+		// 超时挂在 context 上（不改调用方 client 的配置）；client 优先用 Client 自带的那份，
+		// 这样测试注入的 transport 能拦到这条请求。
+		ctx, cancel := context.WithTimeout(context.Background(), reportClientIPTimeout)
+		defer cancel()
+		req = req.WithContext(ctx)
+		cli := c.HTTP
+		if cli == nil {
+			cli = http.DefaultClient
+		}
 		resp, err := cli.Do(req)
 		if err != nil {
 			return

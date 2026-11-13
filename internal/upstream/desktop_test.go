@@ -363,6 +363,11 @@ func TestDesktopChatWithExpertModerationHeader(t *testing.T) {
 func TestCLIChainFieldsMatchOfficial(t *testing.T) {
 	var got []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 上报前会先取一次本机出口 IP（clientIp 字段），这条不带请求体，要单独应答。
+		if r.URL.Path == reportClientIPPath {
+			w.Write([]byte(`{"ip":"203.0.113.9"}`))
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(raw, &got); err != nil {
 			t.Fatalf("body must be array: %v", err)
