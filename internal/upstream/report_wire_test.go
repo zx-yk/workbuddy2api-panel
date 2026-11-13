@@ -138,7 +138,7 @@ func TestReportChatActivityHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	a := &auth.Auth{AccessToken: "at-wire", UID: "u-wire", Domain: "www.workbuddy.cn"}
 	if err := c.ReportChatActivity(a, "wb2api-1", ""); err != nil {
 		t.Fatalf("report: %v", err)

@@ -57,15 +57,16 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	return c.doJSON(req)
 }
 
-// reportJSON 发 `/v2/report`（billing 域）并解信封，请求头走 ReportHeaders。
-// 与 billingJSON 的唯一区别是头族：/v2/report 的官方出站头与 billing 各族不同
-// （多 X-Product / X-Request-ID / X-Requested-With 与完整 Accept/Content-Type，
-// 少 x-codebuddy-request / Accept-Language / X-Device-Token），逐字节核对后单列。
+// reportJSON 发 `/v2/report` 并解信封，请求头走 ReportHeaders。
+//
+// 域名取**对话域**（chatBase）：该通道的发送方是桌面端上报服务，它的 URL 由产品配置的
+// endpoint 拼出，与对话/配置同域；而该族其它端点（签到、企业用量、额度）在另一个域。
+// 与 billingJSON 的区别就是「域 + 头族」两处，不要合并。
 func (c *Client) reportJSON(a *auth.Auth, body []byte) (json.RawMessage, error) {
 	// 事件级公共字段：官方客户端给批量里的每一条都补上 clientIp，我们同一处注入，
 	// 避免逐事件结构体加字段时漏掉某个事件码。
 	body = c.injectReportClientIP(a, body)
-	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+reportPath, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, c.chatBase(a)+reportPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

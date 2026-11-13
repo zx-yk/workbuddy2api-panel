@@ -1101,6 +1101,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 客户端形态默认字段（前缀缓存保留档 / 思考摘要档）：必须放在最后，前面的清洗
+	// 与密钥注入都可能重建 body。
+	body = applyChatDefaults(body)
 	return body
 }
 
