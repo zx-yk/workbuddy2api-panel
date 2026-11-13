@@ -1455,6 +1455,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	// 客户端形态的逐条消息元数据与内联行为事件（官方在多轮请求里都带）。
+	prepared = applyChatExtras(prepared, meta)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
