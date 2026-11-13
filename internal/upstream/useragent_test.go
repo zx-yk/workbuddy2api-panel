@@ -47,12 +47,12 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 			wantUA: defaultUAString,
 		},
 		{
-			// 官方 CLI：CLI/2.165.0 WorkBuddy/2.165.0（两段，无桌面版本段）。
-			name: "report_cli_ua",
+			// 该通道发送方是桌面端守护进程：UA 单段 `WorkBuddy/<clientVersion>`。
+			name: "report_desktop_ua",
 			call: func(c *Client) error {
 				return c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 			},
-			wantUA: "CLI/" + defaultCliVersion + " WorkBuddy/" + defaultCliVersion,
+			wantUA: "WorkBuddy/" + defaultClientVersion,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

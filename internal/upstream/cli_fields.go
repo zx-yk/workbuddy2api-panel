@@ -1,10 +1,6 @@
 package upstream
 
-// 本文件由官方 CLI 实时抓包结果生成，请勿手工编辑。
-// 原始快照：myindex/wb2api-官方CLI上报事件快照-20261106.json
-
-// cliOfficialFields 官方 CLI 独立运行时实测到的字段集（2026-11-06 实时抓取：
-// 本地 mock + 内置 CLI，抓到 12 批 /v2/report，6 个事件码）。
+// cliOfficialFields 官方 CLI 上报事件（/v2/report）的字段集，6 个事件码。
 //
 // 用途：注入公共指纹后按它裁剪 —— 官方报文里没有的字段一律不发。
 // 为什么用白名单而不是逐条删：UI 侧事件与 CLI 链的公共字段集**不同**
@@ -14,7 +10,11 @@ package upstream
 // 注：设备级标识字段（官方报文里有、但只在该字段自有的部署里注入）
 // 不列入本表 —— 公开仓库不出现该字段名，部署侧自行按需注入。
 //
-// 键 = eventCode，值 = 该事件实测到的完整字段名列表。
+// 2026-11-14 补 `clientIp`：该字段由上报服务在批量发送前统一写入每条事件
+// （值取自本机出口公网 IP），不是单个事件的私有字段，因此六个事件码一并加入。
+// 注入点在发送前、白名单裁剪之后（见 client_ip.go / desktop.go）。
+//
+// 键 = eventCode，值 = 该事件的完整字段名列表。
 var cliOfficialFields = map[string][]string{
 	"chat_message_response": {
 		"agentName", "agentType", "arch", "cachedMissTokens", "cachedTokens", "cachedWriteTokens",
@@ -24,7 +24,7 @@ var cliOfficialFields = map[string][]string{
 		"messageErrorCode", "messageId", "os", "osVersion", "outputToken", "parentConversationId",
 		"presentAt", "product", "releaseDate", "reportDelay", "requestId", "requestModelId",
 		"requestModelName", "responseModelId", "rootRequestId", "sessionId", "timestamp", "timezone",
-		"totalStepCount", "totalToken", "traceId", "userId", "userNickname", "username",
+		"totalStepCount", "totalToken", "traceId", "userId", "userNickname", "username", "clientIp",
 	},
 	"chat_message_send": {
 		"agentName", "agentType", "arch", "codebuddy.conversation_request_id", "codebuddy.session_id", "commit",
@@ -33,7 +33,7 @@ var cliOfficialFields = map[string][]string{
 		"isContextTruncated", "machineId", "memorySize", "messageId", "os", "osVersion",
 		"parentConversationId", "presentAt", "product", "releaseDate", "reportDelay", "requestId",
 		"requestModelId", "requestModelName", "rootRequestId", "sessionId", "timestamp", "timezone",
-		"totalStepCount", "traceId", "userId", "userNickname", "username",
+		"totalStepCount", "traceId", "userId", "userNickname", "username", "clientIp",
 	},
 	"chat_message_status": {
 		"agentName", "agentType", "arch", "codebuddy.conversation_request_id", "codebuddy.session_id", "commit",
@@ -41,7 +41,7 @@ var cliOfficialFields = map[string][]string{
 		"ideName", "ideType", "ideVersion", "machineId", "memorySize", "messageErrorCode",
 		"messageId", "os", "osVersion", "parentConversationId", "product", "releaseDate",
 		"reportDelay", "requestId", "requestModelId", "requestModelName", "rootRequestId", "sessionId",
-		"timestamp", "timezone", "traceId", "userId", "userNickname", "username",
+		"timestamp", "timezone", "traceId", "userId", "userNickname", "username", "clientIp",
 	},
 	"chat_request_send": {
 		"agentName", "agentType", "arch", "codebaseEnable", "codebaseId", "codebuddy.conversation_request_id",
@@ -52,7 +52,7 @@ var cliOfficialFields = map[string][]string{
 		"os", "osVersion", "parentConversationId", "presentAt", "product", "recommendId",
 		"releaseDate", "reportDelay", "requestId", "requestModelId", "requestModelName", "rootRequestId",
 		"sessionId", "skillId", "timestamp", "timezone", "traceId", "userId",
-		"userNickname", "username", "vcsBranchName", "vcsRepo", "vcsRevId", "vcsType",
+		"userNickname", "username", "vcsBranchName", "vcsRepo", "vcsRevId", "vcsType", "clientIp",
 	},
 	"chat_tool_action": {
 		"agentName", "agentType", "arch", "codebuddy.conversation_request_id", "codebuddy.session_id", "commit",
@@ -62,13 +62,13 @@ var cliOfficialFields = map[string][]string{
 		"reportDelay", "requestId", "requestModelId", "requestModelName", "rootRequestId", "sessionId",
 		"stepCount", "timestamp", "timezone", "toolCallId", "toolCallSuccessful", "toolErrorCode",
 		"toolErrorCodeKey", "toolErrorMessage", "toolName", "toolStatus", "totalStepCount", "traceId",
-		"type", "userId", "userNickname", "username",
+		"type", "userId", "userNickname", "username", "clientIp",
 	},
 	"user_task_failed_credit_refund": {
 		"arch", "codebuddy.conversation_request_id", "codebuddy.session_id", "commit", "conversationId", "cpuCores",
 		"cpuModel", "eventCode", "extName", "extVersion", "ideName", "ideType",
 		"ideVersion", "machineId", "memorySize", "os", "osVersion", "product",
 		"reason", "releaseDate", "reportDelay", "requestId", "rootRequestId", "sessionId",
-		"timestamp", "timezone", "userId", "userNickname", "username",
+		"timestamp", "timezone", "userId", "userNickname", "username", "clientIp",
 	},
 }

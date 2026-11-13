@@ -249,6 +249,9 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 		return fmt.Errorf("desktop report: no events")
 	}
 	fp := c.desktopFingerprint(a)
+	// 事件里要带本机出口公网 IP（官方客户端每条事件都带）。探测一次、进程内复用；
+	// 取不到就不加这个字段，宁缺不错。
+	clientIP := c.resolveReportClientIP(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -273,6 +276,12 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 						delete(m, k)
 					}
 				}
+			}
+		}
+		// 白名单裁剪之后再加，避免被当作「官方没有的字段」删掉。
+		if clientIP != "" {
+			if _, ok := m["clientIp"]; !ok {
+				m["clientIp"] = clientIP
 			}
 		}
 		arr = append(arr, m)

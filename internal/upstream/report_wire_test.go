@@ -85,9 +85,8 @@ func TestReportHeadersWireCase(t *testing.T) {
 	wantExact := []string{
 		"Accept: application/json, text/plain, */*\r\n",
 		"Content-Type: application/json;charset=UTF-8\r\n",
-		"X-Requested-With: XMLHttpRequest\r\n",
 		"X-Product: SaaS\r\n",
-		"User-Agent: CLI/" + defaultCliVersion + " WorkBuddy/" + defaultCliVersion + "\r\n",
+		"User-Agent: WorkBuddy/" + defaultClientVersion + "\r\n",
 		"Authorization: Bearer at-report\r\n",
 		"X-User-Id: 00000000-0000-4000-8000-000000000001\r\n",
 		"X-Domain: www.workbuddy.cn\r\n",
@@ -119,6 +118,7 @@ func TestReportHeadersWireCase(t *testing.T) {
 	wantAbsent := []string{
 		"\r\nx-codebuddy-request:", "\r\nX-CodeBuddy-Request:",
 		"\r\nAccept-Language:", "\r\nX-Device-Token:", "\r\nX-Api-Key:",
+		"\r\nX-Requested-With:",
 		"\r\nTransfer-Encoding:",
 	}
 	for _, k := range wantAbsent {
@@ -145,14 +145,13 @@ func TestReportChatActivityHeaders(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"Accept":           "application/json, text/plain, */*",
-		"Content-Type":     "application/json;charset=UTF-8",
-		"X-Requested-With": "XMLHttpRequest",
-		"X-Product":        "SaaS",
-		"User-Agent":       "CLI/" + defaultCliVersion + " WorkBuddy/" + defaultCliVersion,
-		"X-User-Id":        "u-wire",
-		"X-Domain":         "www.workbuddy.cn",
-		"Connection":       "keep-alive",
+		"Accept":       "application/json, text/plain, */*",
+		"Content-Type": "application/json;charset=UTF-8",
+		"X-Product":    "SaaS",
+		"User-Agent":   "WorkBuddy/" + defaultClientVersion,
+		"X-User-Id":    "u-wire",
+		"X-Domain":     "www.workbuddy.cn",
+		"Connection":   "keep-alive",
 	}
 	for k, v := range want {
 		if got := seen.Get(k); got != v {

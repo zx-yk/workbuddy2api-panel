@@ -62,6 +62,9 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 // （多 X-Product / X-Request-ID / X-Requested-With 与完整 Accept/Content-Type，
 // 少 x-codebuddy-request / Accept-Language / X-Device-Token），逐字节核对后单列。
 func (c *Client) reportJSON(a *auth.Auth, body []byte) (json.RawMessage, error) {
+	// 事件级公共字段：官方客户端给批量里的每一条都补上 clientIp，我们同一处注入，
+	// 避免逐事件结构体加字段时漏掉某个事件码。
+	body = c.injectReportClientIP(a, body)
 	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+reportPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

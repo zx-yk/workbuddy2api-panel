@@ -14,13 +14,12 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.9.3）。
+	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.11.3）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.9.3"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方桌面端内置 CLI（2.165.0，
-	// 2026-10-28 抓包实测 UA 尾部即 `CLI/2.165.0`；此前写的 2.137.1 是旧值）。
+	defaultClientVersion = "5.11.3"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方桌面端内置 CLI（2.176.0）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.165.0"
+	defaultCliVersion = "2.176.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -109,19 +108,16 @@ func (c *Client) billingUA() string {
 	return "WorkBuddy/" + c.clientVersion()
 }
 
-// reportUA `/v2/report` 出站 UA：官方**内置 CLI 进程**上报时是两段形态
-// `CLI/<cliVersion> WorkBuddy/<cliVersion>`。
+// reportUA `/v2/report` 出站 UA：单段 `WorkBuddy/<clientVersion>`。
 //
-// 注意与桌面进程自身上报的三段形态区分：`WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`。
-// 本通道 body 是 CLI 事件（agentName="cli"），UA 与报文形态保持一致，才不产生
-// 「桌面 UA + CLI body」这种自相矛盾的组合。
+// 该通道的发送方是桌面端守护进程，其 UA 由 `applicationName/appVersion` 组成，
+// 与对话链的三段 UA（`WorkBuddy/<v> WorkBuddy/<v> CLI/<v>`）不是一回事。
 // 显式配置 c.UserAgent 时优先（运维逃生门，同其它头族）。
 func (c *Client) reportUA() string {
 	if c != nil && c.UserAgent != "" {
 		return c.UserAgent
 	}
-	v := c.cliVersion()
-	return "CLI/" + v + " WorkBuddy/" + v
+	return "WorkBuddy/" + c.clientVersion()
 }
 
 // resolveDeviceToken 解析本次请求的 X-Device-Token 取值。
@@ -642,17 +638,17 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	attachAccountUID(req, a)
 }
 
-// ReportHeaders `/v2/report` 专属请求头，逐头对齐官方内置 CLI 的出站形态（13 个头）：
+// ReportHeaders `/v2/report` 专属请求头，对齐该通道真实发送方的出站形态：
 //
 //	POST /v2/report HTTP/1.1
 //	Accept: application/json, text/plain, */*
 //	Content-Type: application/json;charset=UTF-8
-//	X-Requested-With: XMLHttpRequest
 //	X-Request-ID: <32 位小写 hex，每批不同>
 //	X-Product: SaaS
-//	User-Agent: CLI/2.165.0 WorkBuddy/2.165.0
+//	User-Agent: WorkBuddy/5.11.3
 //	Authorization: Bearer <token>
 //	X-User-Id: <uid>
+//	X-Enterprise-Id / X-Tenant-Id: <企业号才有>
 //	X-Domain: www.workbuddy.cn
 //	Content-Length: <n>
 //	Accept-Encoding: gzip, compress, deflate, br
@@ -660,14 +656,13 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 //	Connection: keep-alive
 //
 // 与 BillingHeaders 的差异（有意为之，不要合并）：不注入 x-codebuddy-request、
-// Accept-Language、X-Device-Token —— 官方 CLI 与桌面进程两条链都不发这三个头，
-// 它们是该族其它端点（checkin/企业用量）的形态。
+// Accept-Language、X-Device-Token —— 该通道的发送方不发这三个头，它们是该族其它
+// 端点（checkin/企业用量）的形态。同理不发 X-Requested-With。
 // Accept-Encoding 保持 Go 默认 gzip：手动设置会关闭 Transport 的自动解压，且官方含
 // br（Go 标准库无 brotli 解码器），属于已知残留差异。
 func (c *Client) ReportHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	// 官方键名是 X-Request-ID（ID 全大写）。Header.Set 会规范化成 X-Request-Id
 	// （textproto 规则），线上就与客户端不一致，必须 setExact。
 	setExact(req.Header, "X-Request-ID", session.NewMessageID())
