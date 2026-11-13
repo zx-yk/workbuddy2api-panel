@@ -1207,7 +1207,7 @@ cd /opt/wb2api-panel && cp config.example.json config.json && ./wb2api -config c
 ./scripts/build-image-prebuilt.sh --ctx-only     # 交叉编译四个二进制 + 组装 24M 上下文
 scp -r prebuilt-ctx root@<host>:/root/
 ssh root@<host> 'cd /root/prebuilt-ctx && docker build -t workbuddy2api-panel:dev .'
-# 目标机零编译，实测 41.7MB / 13s（低配机器亦可）；本机有 Docker 可省传输，--save 可导出 tar
+# 目标机零编译，约 41.7MB / 13s（低配机器亦可）；本机有 Docker 可省传输，--save 可导出 tar
 
 # C2. 目标机直接构建（需 ≥4G 内存，build 阶段 go build 峰值约 1G）
 git clone https://github.com/zx-yk/workbuddy2api-panel.git
@@ -1225,12 +1225,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o wb2
 ./scripts/run-local.sh --api-key mykey  # 换密钥（默认读 config，没有则 localtest）
 ```
 
-只编 `cmd/server` 一个二进制（实测 14s），运行目录落在 `.run/`（已 gitignore）。账号池默认是空的：`/healthz` 显示 `total=0`、对话请求返回 503 `no_healthy_account` 都属预期；把账号 JSON 放进 `.run/auths/` 即可真实对话。面板在 `http://127.0.0.1:<port>/panel/`。
+只编 `cmd/server` 一个二进制（约 14s），运行目录落在 `.run/`（已 gitignore）。账号池默认是空的：`/healthz` 显示 `total=0`、对话请求返回 503 `no_healthy_account` 都属预期；把账号 JSON 放进 `.run/auths/` 即可真实对话。面板在 `http://127.0.0.1:<port>/panel/`。
 
 > **CI 触发规则**（自己改流水线时看）：push 到 `integrated` → 测试 + 五平台编译 + 多架构镜像；打 `v*` tag → 额外生成语义化镜像 tag 与 Release 资产；PR 仅构建验证不发布。**`main` 是上游镜像快照，刻意不触发**，避免误发不含整合端点的旧版。
 > 新 fork 的仓库，GitHub 默认禁用 workflows，需先到 Actions 页点一次「I understand my workflows, go ahead and enable them」。
 
-> **国内构建的坑**：`Dockerfile.prebuilt` 的 `apk add` 默认走 `mirrors.aliyun.com`。走官方 `dl-cdn.alpinelinux.org` 实测单次 build 卡了 13 分钟没动，换源后 13 秒完成。国外构建可 `--build-arg APK_MIRROR=dl-cdn.alpinelinux.org` 覆盖。
+> **国内构建的坑**：`Dockerfile.prebuilt` 的 `apk add` 默认走 `mirrors.aliyun.com`。走官方 `dl-cdn.alpinelinux.org` 单次 build 会卡到十几分钟不动，换源后 13 秒完成。国外构建可 `--build-arg APK_MIRROR=dl-cdn.alpinelinux.org` 覆盖。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
@@ -1481,14 +1481,14 @@ export ANTHROPIC_API_KEY=your-api-key               # 走 x-api-key
 
 （上面用 `<PIPE>` 占位，真实分隔符是两个全角竖线。）
 
-上游**只在请求声明了 `tools` 时**才把这段标记解析成结构化 `tool_calls`。一旦某次请求没带上 `tools`——实测这在链路上是常态（协议转换丢字段、一次性 `exec` 探测、auto-review 复核回合等）——模型仍然想调工具，于是标记以纯文本落进 `content`。下游没有任何一层认识它：Codex 只执行 Responses API 的结构化 `function_call` 条目，于是把它当普通助手正文写进会话历史，回合直接 `task_complete`、工具一次都没跑。
+上游**只在请求声明了 `tools` 时**才把这段标记解析成结构化 `tool_calls`。一旦某次请求没带上 `tools`——这在链路上是常态（协议转换丢字段、一次性 `exec` 探测、auto-review 复核回合等）——模型仍然想调工具，于是标记以纯文本落进 `content`。下游没有任何一层认识它：Codex 只执行 Responses API 的结构化 `function_call` 条目，于是把它当普通助手正文写进会话历史，回合直接 `task_complete`、工具一次都没跑。
 
 网关在出站响应里做最后一道还原（`internal/upstream/dsml.go`），判定分两级：
 
 | 工具名单状态 | 判定 |
 |---|---|
 | 非空 | **严格**：块内每个工具名都必须在名单里 |
-| 为空（`tools` 丢失，实测常态） | **弱**：块必须完美闭合，且工具名形如合法标识符（`^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$`） |
+| 为空（`tools` 丢失，常见） | **弱**：块必须完美闭合，且工具名形如合法标识符（`^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$`） |
 
 名单有两个来源，二者会分别缺失，所以都要：**本请求声明的工具**（`tools[].function.name` / `tools[].name` / `functions[].name`）与**会话历史里出现过的工具名**（`messages[].tool_calls[].function.name`）。
 
@@ -1928,7 +1928,7 @@ http://127.0.0.1:7863/panel/
 
 ### 探测模型真实输出上限
 
-上游 `/v3/config` 里的 `max_output_tokens` 是**声称值**，普遍虚高：实测 16 个 CN 模型中 8 个被
+上游 `/v3/config` 里的 `max_output_tokens` 是**声称值**，普遍虚高：16 个 CN 模型中有 8 个被
 **静默钳制**（请求 `max_tokens` 更大也不报错，输出到真实上限即截断），最狠的声称 1M 实际 32K。
 「模型与档位」视图因此支持在最大输出列叠加**实测标注**：
 
