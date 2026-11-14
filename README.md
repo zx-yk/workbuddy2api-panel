@@ -50,6 +50,7 @@
 
 | 版本 | 一句话 | 关键改动 |
 |---|---|---|
+| **v1.16.30** | chat 请求补逐条消息元数据与内联行为事件 | 多轮请求里 assistant/tool 消息补齐 `conversationRequestId`/`messageId`/`stepSeq`/`agent`/`model`/`traceId` 等字段；`extra_vars.growthEvent` 内联本轮行为事件 |
 | **v1.16.29** | 上报通道改走对话域 + chat 补两个客户端字段 | `/v2/report` 域名从计费域改为对话域；chat 请求在客户端未给出时补 `cache_retention: long` 与 `reasoning_summary: auto` |
 | **v1.16.28** | 客户端版本对齐 5.11.3 + 上报通道形态修正 | 客户端/CLI 版本串升到 `5.11.3` / `2.176.0`；上报 UA 改为单段 `WorkBuddy/5.11.3`，去掉该通道不发的 `X-Requested-With`；每条上报事件补 `clientIp` |
 | **v1.16.27** | buddyapp 事件字段类型修正 | 进入应用事件里的 `isFirstPage` 一直发的字符串 `"1"`，上游按 schema 校验类型判为非法，导致整条事件被丢弃、任务永远 0/1；改为布尔 `true` |
@@ -66,6 +67,23 @@
 | **v1.16.16** | UI 事件与 CLI 事件分开构造 | UI 事件不再注入 CLI 上下文；`messageId` 改为 = `requestId`；补 `buddyId`/`buddyName` |
 | **v1.16.15** | 上报字段与硬件画像对齐官方客户端 | 桌面端上报字段、错误分类按官方码表 |
 
+
+### v1.16.30 · 2026-11-14
+
+chat 请求补两类客户端形态字段，无配置变更，替换二进制即可。
+
+**1. 逐条消息元数据**
+
+多轮请求里，`assistant` / `tool` 消息补 `conversationRequestId`、`messageId`、`stepSeq`、
+`agent`、`model`、`requestModelId`、`requestModelName`、`traceId`。`messageId` 由「角色 + 内容」
+派生（同一条历史消息在多轮之间取值稳定），避免历史消息字节抖动导致前缀缓存失效；
+`system` / `user` 消息不加。
+
+**2. `extra_vars.growthEvent` 内联**
+
+把本轮的行为事件以字符串形态内联进请求体（与独立上报并行）。客户端已经带这个字段时一律不覆盖。
+
+这两项都只在字段缺失时补齐，非 JSON 对象的请求体原样透传。
 
 ### v1.16.29 · 2026-11-14
 
